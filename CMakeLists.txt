@@ -21,13 +21,26 @@ include(CTest)
 
 # Setup library
 cpp_library_setup(
-    DESCRIPTION "Aligned storage foundation for CEL evaluation"
+    DESCRIPTION "Owned values and checked canonical type layouts for CEL evaluation"
     NAMESPACE cel
     REQUIRES_CPP_VERSION 20
-    HEADERS runtime/layout.hpp
-    SOURCES storage.cpp
-    TESTS storage_test.cpp
+    HEADERS runtime/layout.hpp runtime/value_type.hpp runtime/value.hpp
+    SOURCES storage.cpp value_type.cpp value.cpp
+    TESTS storage_test.cpp value_test.cpp
 )
 if(TARGET storage_test)
     target_include_directories(storage_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+if(TARGET value_test)
+    target_include_directories(value_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+
+if(BUILD_TESTING)
+    add_test(NAME nontrivial_leaf_fail
+        COMMAND "${CMAKE_COMMAND}"
+            "-DCXX=${CMAKE_CXX_COMPILER}"
+            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/nontrivial_leaf_fail.cpp"
+            "-DINCLUDE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "-DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/nontrivial_leaf_fail.o"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/compile_fail.cmake")
 endif()
