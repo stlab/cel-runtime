@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <exception>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -28,15 +29,30 @@ struct type_plan {
     type_kind kind = type_kind::tuple;        ///< Identifies the shape.
     layout bytes{0, 1};                       ///< Describes its canonical representation.
     bool owns = true;                         ///< Records complete ownership capabilities.
+    bool parameter = true;                    ///< Caches built-in/composite parameter admission.
+    std::size_t resources = 0;                ///< Counts direct ownership carriers.
     std::type_index leaf{typeid(void)};       ///< Identifies a concrete leaf.
     std::vector<value_type> fields;           ///< Owns ordered fields or callable parameters.
     std::vector<std::size_t> offsets;         ///< Owns ordered aggregate offsets.
+    std::vector<std::size_t> resource_ends;   ///< Caches cumulative source-order carrier counts.
     std::vector<std::string> names;           ///< Owns record field names.
     std::string identity;                     ///< Owns nominal record identity.
     std::optional<value_type> element;        ///< Retains array/range element identity.
     std::optional<value_type> result;         ///< Retains a complete callable result.
     range_kind form = range_kind::range_full; ///< Retains source range form.
     opaque_ownership operations; ///< Retains trusted callable clone/destruction operations.
+    std::shared_ptr<const type_plan> release_next; ///< Links only dying, uniquely owned plans.
+};
+
+/// Hashes a memoized metadata pair without depending on structural expansion.
+struct plan_pair_hash {
+    /// Combines pointer identities for immutable plan-pair lookup.
+    std::size_t operator()(
+        const std::pair<const type_plan*, const type_plan*>& pair) const noexcept {
+        const auto a = std::hash<const type_plan*>{}(pair.first);
+        const auto b = std::hash<const type_plan*>{}(pair.second);
+        return a ^ (b + std::size_t{0x9e3779b9} + (a << 6U) + (a >> 2U));
+    }
 };
 
 value_type type_access::install_callable_ownership(const value_type& signature,
@@ -55,24 +71,74 @@ opaque_ownership type_access::operations(const value_type& type) noexcept {
 }
 
 bool type_access::compatible_operations(const value_type& expected, const value_type& actual) {
+    return compare_plans(expected, actual, false);
+}
+
+bool type_access::compare_plans(const value_type& expected,
+                                const value_type& actual,
+                                bool semantic) {
+    using pair = std::pair<const type_plan*, const type_plan*>;
     if (expected._plan == actual._plan) return true;
-    switch (expected.kind()) {
-        case type_kind::leaf:
-        case type_kind::range:
-            return true;
-        case type_kind::array:
-            return compatible_operations(expected.element(), actual.element());
-        case type_kind::callable: {
-            const auto a = type_access::operations(expected);
-            const auto b = type_access::operations(actual);
-            return a.clone == b.clone && a.destroy == b.destroy;
+    std::vector<pair> pending{{expected._plan.get(), actual._plan.get()}};
+    std::unordered_set<pair, plan_pair_hash> visited;
+    // Visit each distinct immutable plan pair once, including shared DAG edges.
+    while (!pending.empty()) {
+        const auto [a, b] = pending.back();
+        pending.pop_back();
+        if (a == b || !visited.insert({a, b}).second) continue;
+        if (a->kind != b->kind) return false;
+        if (semantic) {
+            if (a->bytes.size != b->bytes.size || a->bytes.alignment != b->bytes.alignment ||
+                a->leaf != b->leaf || a->identity != b->identity || a->names != b->names ||
+                a->form != b->form || a->offsets != b->offsets ||
+                a->element.has_value() != b->element.has_value() ||
+                a->result.has_value() != b->result.has_value() ||
+                a->fields.size() != b->fields.size())
+                return false;
+        } else if (a->kind == type_kind::callable) {
+            if (a->operations.clone != b->operations.clone ||
+                a->operations.destroy != b->operations.destroy)
+                return false;
+            continue;
+        } else if (a->kind == type_kind::leaf || a->kind == type_kind::range) {
+            continue;
         }
-        case type_kind::tuple:
-        case type_kind::record:
-            return std::equal(expected.fields().begin(), expected.fields().end(),
-                              actual.fields().begin(), compatible_operations);
+        if (a->element && b->element)
+            pending.emplace_back(a->element->_plan.get(), b->element->_plan.get());
+        if (semantic && a->result && b->result)
+            pending.emplace_back(a->result->_plan.get(), b->result->_plan.get());
+        // Retain only borrowed graph edges; root descriptors own all reachable plans.
+        for (std::size_t i = 0; i != a->fields.size(); ++i)
+            pending.emplace_back(a->fields[i]._plan.get(), b->fields[i]._plan.get());
     }
-    return false;
+    return true;
+}
+
+std::size_t type_access::resources(const value_type& type) noexcept {
+    return type._plan->resources;
+}
+bool type_access::parameter_allowed(const value_type& type) noexcept {
+    return type._plan->parameter;
+}
+
+ownership_slot type_access::resource(const value_type& type, std::size_t ordinal) noexcept {
+    assert(ordinal < resources(type));
+    const value_type* current = &type;
+    std::size_t offset = 0;
+    // Cumulative carrier counts select one source-order path without a traversal stack.
+    while (current->kind() == type_kind::tuple || current->kind() == type_kind::record) {
+        const auto& plan = *current->_plan;
+        const auto found =
+            std::upper_bound(plan.resource_ends.begin(), plan.resource_ends.end(), ordinal);
+        const auto i = static_cast<std::size_t>(found - plan.resource_ends.begin());
+        assert(i < plan.fields.size());
+        if (i == plan.fields.size()) std::terminate();
+        if (i != 0) ordinal -= plan.resource_ends[i - 1];
+        offset += plan.offsets[i];
+        current = &plan.fields[i];
+    }
+    assert(current->kind() == type_kind::array || current->kind() == type_kind::callable);
+    return {current, offset};
 }
 
 void require_compatible(const value_type& expected, const value_type& actual) {
@@ -94,27 +160,18 @@ void canonical_layout(type_plan& plan, std::span<const value_type> fields) {
         plan.bytes.size = offset + bytes.size;
         plan.bytes.alignment = std::max(plan.bytes.alignment, bytes.alignment);
         plan.owns = plan.owns && field.owns_values();
+        plan.parameter = plan.parameter && type_access::parameter_allowed(field);
+        const auto count = type_access::resources(field);
+        if (count > std::numeric_limits<std::size_t>::max() - plan.resources)
+            throw std::overflow_error("aggregate ownership count overflow");
+        plan.resources += count;
+        plan.resource_ends.push_back(plan.resources);
     }
     plan.bytes.size = align_offset(plan.bytes.size, plan.bytes.alignment);
 }
 
-/// Reports whether a parameter contains only built-in leaves and composite shapes.
-/// Complexity: O(shape size) time and O(shape depth) call space.
-bool parameter_allowed(const value_type& type) {
-    switch (type.kind()) {
-        case type_kind::leaf:
-            return type.leaf_identity() == typeid(bool) || type.leaf_identity() == typeid(double);
-        case type_kind::array:
-        case type_kind::range:
-            return parameter_allowed(type.element());
-        case type_kind::tuple:
-        case type_kind::record:
-            return std::all_of(type.fields().begin(), type.fields().end(), parameter_allowed);
-        case type_kind::callable:
-            return false;
-    }
-    return false;
-}
+/// Reads the cached built-in/composite parameter predicate.
+bool parameter_allowed(const value_type& type) { return type_access::parameter_allowed(type); }
 
 } // namespace cel::detail
 
@@ -123,12 +180,49 @@ namespace cel {
 value_type::value_type(std::shared_ptr<const detail::type_plan> plan) : _plan(std::move(plan)) {}
 value_type::value_type() : value_type(tuple({})) {}
 
+void value_type::release_plan(std::shared_ptr<const detail::type_plan>& root) noexcept {
+    auto pending = std::move(root);
+    // Move dying descendants into their own worklist links before deleting any parent.
+    while (pending) {
+        auto current = std::move(pending);
+        if (current.use_count() != 1) {
+            current.reset();
+            continue;
+        }
+        auto& plan = *const_cast<detail::type_plan*>(current.get());
+        pending = std::move(plan.release_next);
+        const auto detach = [&](value_type& child) {
+            auto next = std::move(child._plan);
+            if (next && next.use_count() == 1) {
+                auto& node = *const_cast<detail::type_plan*>(next.get());
+                node.release_next = std::move(pending);
+                pending = std::move(next);
+            }
+        };
+        if (plan.element) detach(*plan.element);
+        if (plan.result) detach(*plan.result);
+        for (auto& field : plan.fields)
+            detach(field);
+        current.reset();
+    }
+}
+value_type::~value_type() { release_plan(_plan); }
+value_type& value_type::operator=(const value_type& other) noexcept {
+    if (this != &other) {
+        auto next = other._plan;
+        release_plan(_plan);
+        _plan = std::move(next);
+    }
+    return *this;
+}
+
 value_type value_type::make_leaf(std::type_index identity, layout bytes) {
     (void)align_offset(bytes.size, bytes.alignment);
     auto plan = std::make_shared<detail::type_plan>();
     plan->kind = type_kind::leaf;
     plan->bytes = bytes;
     plan->leaf = identity;
+    plan->parameter = identity == typeid(bool) || identity == typeid(double);
     return value_type(std::move(plan));
 }
 
@@ -137,6 +231,8 @@ value_type value_type::array(value_type element) {
     plan->kind = type_kind::array;
     plan->bytes = {sizeof(void*), alignof(void*)};
     plan->owns = element.owns_values();
+    plan->parameter = element._plan->parameter;
+    plan->resources = 1;
     plan->element = std::move(element);
     return value_type(std::move(plan));
 }
@@ -190,6 +286,7 @@ value_type value_type::range(range_kind form, value_type endpoint) {
     plan->element = endpoint;
     const std::array endpoints{endpoint, endpoint};
     detail::canonical_layout(*plan, std::span(endpoints).first(count));
+    plan->parameter = endpoint._plan->parameter;
     return value_type(std::move(plan));
 }
 
@@ -200,26 +297,15 @@ value_type value_type::callable(std::span<const value_type> parameters, value_ty
     plan->kind = type_kind::callable;
     plan->bytes = {sizeof(void*), alignof(void*)};
     plan->owns = false;
+    plan->parameter = false;
+    plan->resources = 1;
     plan->fields.assign(parameters.begin(), parameters.end());
     plan->result = std::move(result);
     return value_type(std::move(plan));
 }
 
 bool value_type::same_shape(const value_type& other) const {
-    if (_plan == other._plan) return true;
-    if (_plan->kind != other._plan->kind || _plan->bytes.size != other._plan->bytes.size ||
-        _plan->bytes.alignment != other._plan->bytes.alignment ||
-        _plan->leaf != other._plan->leaf || _plan->identity != other._plan->identity ||
-        _plan->names != other._plan->names || _plan->form != other._plan->form ||
-        _plan->offsets != other._plan->offsets ||
-        _plan->element.has_value() != other._plan->element.has_value() ||
-        _plan->result.has_value() != other._plan->result.has_value())
-        return false;
-    if (_plan->element && !_plan->element->same_shape(*other._plan->element)) return false;
-    if (_plan->result && !_plan->result->same_shape(*other._plan->result)) return false;
-    return std::equal(_plan->fields.begin(), _plan->fields.end(), other._plan->fields.begin(),
-                      other._plan->fields.end(),
-                      [](const auto& a, const auto& b) { return a.same_shape(b); });
+    return detail::type_access::compare_plans(*this, other, true);
 }
 
 type_kind value_type::kind() const noexcept { return _plan->kind; }

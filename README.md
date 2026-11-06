@@ -55,6 +55,20 @@ Descriptors retain signatures without constructing callable bodies.
 `owns_values()` reports complete type-level clone/destruction capabilities;
 an empty array can still be owned when its element capability is deferred.
 
+Arrays own one aligned allocation of canonically laid-out elements, including
+tuple and record fields. Scalar elements do not have individual heap boxes.
+Standard vector conversion copies elements into this allocation rather than
+adopting the vector's implementation-specific storage.
+
+Descriptor release, raw cloning, and value destruction do not recurse with
+runtime nesting depth. Final cleanup does not allocate: dying metadata and
+array nodes supply their own worklist links. Callable parameter eligibility
+is cached in each immutable plan, and comparisons memoize distinct plan pairs
+instead of expanding shared tuple graphs. No structural depth limit is imposed.
+Ownership traversal selects canonical carrier slots through cached subtree
+counts; its time depends on the field paths visited, not only the number of
+carrier bytes.
+
 Floating-point extraction preserves IEEE binary64 values, including NaN.
 The library does not expose value equality or ordering.
 

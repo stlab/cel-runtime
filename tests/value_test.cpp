@@ -119,15 +119,31 @@ TEST_CASE("private callable ownership installation preserves shape and validates
             "partial", std::array{cel::record_field{"items", children[0].type()},
                                   cel::record_field{"code", installed}});
         const auto good_record = cel::value::record(failing_record, children);
+        const auto packed_records =
+            cel::value::array(failing_record, std::array{good_record, good_record});
+        auto replacement_record = good_record;
+        auto replacement_array = cel::value::array(installed, std::array{owner});
         const auto live_before = live_test_owners;
         auto destination = cel::value::from(false);
         fail_test_clone = true;
         CHECK_THROWS_AS(cel::value::record(failing_record, children), std::runtime_error);
         CHECK_THROWS_AS(cel::value{good_record}, std::runtime_error);
+        CHECK_THROWS_AS(cel::value{packed_records}, std::runtime_error);
         CHECK_THROWS_AS(destination = good_record, std::runtime_error);
+        CHECK_THROWS_AS(replacement_record.set_field("code", owner), std::runtime_error);
+        CHECK_THROWS_AS(replacement_array.set(0, owner), std::runtime_error);
         fail_test_clone = false;
         CHECK(live_test_owners == live_before);
         CHECK_FALSE(destination.as<bool>());
+        int* preserved = nullptr;
+        auto preserved_field = replacement_record.field("code");
+        std::memcpy(static_cast<void*>(&preserved),
+                    cel::detail::value_access::data(preserved_field), sizeof(preserved));
+        CHECK(*preserved == 17);
+        preserved_field = replacement_array.at(0);
+        std::memcpy(static_cast<void*>(&preserved),
+                    cel::detail::value_access::data(preserved_field), sizeof(preserved));
+        CHECK(*preserved == 17);
     }
     CHECK(live_test_owners == 0);
 }
@@ -155,6 +171,8 @@ TEST_CASE("empty and nested owning boundary adapters retain complete shapes") {
     CHECK(unit.type().byte_layout().size == 0);
     CHECK_FALSE(unit.type().same_shape(empty.type()));
     CHECK(unit.as<std::tuple<>>() == std::tuple<>{});
+    const std::vector<std::tuple<>> units(3);
+    CHECK(cel::value::from(units).as<std::vector<std::tuple<>>>() == units);
     const auto nested = std::tuple{std::tuple{true}, 3.0};
     CHECK(cel::value::from(nested).as<decltype(nested)>() == nested);
     CHECK_FALSE(
@@ -171,7 +189,14 @@ TEST_CASE("empty and nested owning boundary adapters retain complete shapes") {
     CHECK(aligned_value.type().byte_layout().alignment == 256);
     const auto nested_arrays = std::vector{std::tuple{std::vector<double>{1.0, 2.0}, flags}};
     CHECK(cel::value::from(nested_arrays).as<decltype(nested_arrays)>() == nested_arrays);
+    const auto sparse =
+        std::tuple{std::tuple<>{}, std::vector<double>{2.0}, true, std::tuple<>{}, flags};
+    CHECK(cel::value::from(sparse).as<decltype(sparse)>() == sparse);
     CHECK_THROWS_AS(empty.at(0), std::out_of_range);
+    CHECK_THROWS_AS(cel::value::from(std::vector<bool>{true}).as<std::vector<double>>(),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(cel::value::from(std::tuple{true}).as<std::tuple<double>>(),
+                    std::invalid_argument);
     CHECK_THROWS_AS(cel::value::from(true).size(), std::invalid_argument);
 }
 
@@ -296,6 +321,14 @@ TEST_CASE("callable descriptors retain complete signatures and validate capabili
     CHECK_FALSE(callable.same_shape(cel::value_type::callable(std::array{boolean}, inner)));
     CHECK_FALSE(inner.same_shape(client));
     CHECK_THROWS_AS(cel::value_type::callable(std::array{client}, number), std::invalid_argument);
+    CHECK_THROWS_AS(cel::value_type::callable(std::array{inner}, number), std::invalid_argument);
+    CHECK_THROWS_AS(
+        cel::value_type::callable(std::array{cel::value_type::tuple(std::array{inner})}, number),
+        std::invalid_argument);
+    CHECK_THROWS_AS(
+        cel::value_type::callable(
+            std::array{cel::value_type::range(cel::range_kind::range_full, client)}, number),
+        std::invalid_argument);
     CHECK_THROWS_AS(cel::value_type::callable(std::array{cel::value_type::array(client)}, number),
                     std::invalid_argument);
     CHECK_THROWS_AS(number.parameters(), std::invalid_argument);

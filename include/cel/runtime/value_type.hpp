@@ -54,6 +54,9 @@ class value_type {
     explicit value_type(std::shared_ptr<const detail::type_plan> plan);
     /// Registers a trusted concrete leaf with a checked layout.
     static value_type make_leaf(std::type_index identity, layout bytes);
+    /// Releases uniquely owned metadata through node-owned worklists without allocating.
+    /// Complexity: O(released plans + edges + name bytes) time and O(1) auxiliary space.
+    static void release_plan(std::shared_ptr<const detail::type_plan>& plan) noexcept;
 
 public:
     /// Creates the empty tuple descriptor (source unit).
@@ -62,15 +65,17 @@ public:
     value_type(const value_type&) noexcept = default;
     /// Shares immutable metadata and leaves the source descriptor valid.
     value_type(value_type&& other) noexcept : _plan(other._plan) {}
-    /// Shares immutable metadata, including on self-assignment.
-    value_type& operator=(const value_type&) noexcept = default;
+    /// Shares immutable metadata and releases prior unique plans without allocating.
+    /// Complexity: O(released plans + edges + name bytes) time and O(1) auxiliary space.
+    value_type& operator=(const value_type& other) noexcept;
     /// Shares immutable metadata and leaves the source descriptor valid.
+    /// Complexity: O(released prior plans + edges + name bytes) time and O(1) auxiliary space.
     value_type& operator=(value_type&& other) noexcept {
-        _plan = other._plan;
-        return *this;
+        return *this = static_cast<const value_type&>(other);
     }
-    /// Releases this reference to the metadata.
-    ~value_type() = default;
+    /// Releases this reference and uniquely owned descendants without recursion or allocation.
+    /// Complexity: O(released plans + edges + name bytes) time and O(1) auxiliary space.
+    ~value_type();
 
     /// Registers T as an opaque, trivially copyable leaf; rejects nontrivial T at compile time.
     /// This does not infer equality or ownership of objects referenced by T.
@@ -102,11 +107,12 @@ public:
     static value_type range(range_kind form, value_type endpoint);
     /// Creates a complete signature with built-in/composite parameters and any valid result.
     /// Throws std::invalid_argument if a parameter contains a client leaf or callable.
-    /// Complexity: O(parameter shape size) time and O(parameter count) metadata space.
+    /// Complexity: O(parameter count) time and metadata space; predicates are cached per plan.
     /// Example: `auto signature = value_type::callable({}, value_type::leaf<bool>());`.
     static value_type callable(std::span<const value_type> parameters, value_type result);
     /// Compares complete identities, shapes, source ordering, and canonical layouts.
-    /// Complexity: O(combined shape size and name bytes) time and O(shape depth) call space.
+    /// Complexity: O(distinct visited plan pairs, their edges, and name bytes) expected time
+    /// and O(distinct visited plan pairs) auxiliary space; shared DAGs are not expanded.
     /// Example: `value_type::leaf<bool>().same_shape(value_type::leaf<double>()) == false`.
     bool same_shape(const value_type& other) const;
     /// Returns the structural category.

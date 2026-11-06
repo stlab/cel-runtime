@@ -26,7 +26,7 @@ cpp_library_setup(
     REQUIRES_CPP_VERSION 20
     HEADERS runtime/layout.hpp runtime/value_type.hpp runtime/value.hpp
     SOURCES storage.cpp value_type.cpp value.cpp
-    TESTS storage_test.cpp value_test.cpp
+    TESTS storage_test.cpp value_test.cpp resource_test.cpp nontrivial_leaf_fail.cpp
 )
 if(TARGET storage_test)
     target_include_directories(storage_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -34,13 +34,7 @@ endif()
 if(TARGET value_test)
     target_include_directories(value_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 endif()
-
-if(BUILD_TESTING)
-    add_test(NAME nontrivial_leaf_fail
-        COMMAND "${CMAKE_COMMAND}"
-            "-DCXX=${CMAKE_CXX_COMPILER}"
-            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/nontrivial_leaf_fail.cpp"
-            "-DINCLUDE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/include"
-            "-DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/nontrivial_leaf_fail.o"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/compile_fail.cmake")
+if(TARGET resource_test)
+    target_include_directories(resource_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    set_tests_properties(resource_test PROPERTIES TIMEOUT 30)
 endif()

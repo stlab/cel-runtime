@@ -19,6 +19,13 @@ namespace cel {
 namespace detail {
 struct owned_payload;
 struct value_access;
+/// Borrows packed array elements; the owning value controls the view's lifetime.
+struct array_view {
+    const value_type& element; ///< Borrows the complete canonical element type.
+    const std::byte* data;     ///< Borrows initialized canonical element bytes.
+    std::size_t size;          ///< Counts initialized elements.
+    std::size_t stride;        ///< Gives the canonically padded element byte extent.
+};
 template <class T>
 struct concrete_adapter;
 } // namespace detail
@@ -49,36 +56,54 @@ class value {
     /// Complexity: O(payload size) time and owned space.
     static value aggregate(value_type type, std::span<const value> fields);
     /// Takes already-owned boundary children without cloning their mutable payloads.
-    /// Throws std::invalid_argument for wrong shapes; failure releases all children.
-    /// Complexity: O(element count + compared shape size) time and O(element count) wrapper
-    /// storage.
-    static value array_owned(value_type element, std::vector<value> children);
-    /// Takes already-owned tuple boundary fields into canonical storage.
-    /// Complexity: O(field byte extents + field count) time and canonical outer storage.
-    static value tuple_owned(std::span<value> fields);
+    /// Throws std::invalid_argument for wrong shapes; failure releases completed transfers.
+    /// Remaining sources retain ownership.
+    /// Complexity: O(canonical element bytes + compared shape size) time and packed outer storage.
+    static value array_owned(value_type element, std::span<value> children);
     /// Borrows canonical bytes from a live public owner.
     static const std::byte* raw_data(const value& owner) noexcept;
-    /// Borrows non-relocated array children from a live canonical carrier.
+    /// Borrows packed array elements from a live canonical carrier.
     /// Precondition: data contains an initialized array carrier.
-    static std::span<const value> array_children(const std::byte* data) noexcept;
+    static detail::array_view array_data(const std::byte* data) noexcept;
+    /// Initializes one canonical owner through a trusted concrete boundary writer.
+    /// The writer cleans up partial construction if it throws.
+    /// Complexity: O(payload size) time and owned space.
+    static value from_concrete(value_type type,
+                               const void* source,
+                               void (*write)(const void*, const value_type&, std::byte*));
+    /// Writes a packed array with one element allocation and tracked initialized prefix.
+    /// The element writer releases its partial element on failure.
+    /// Throws std::overflow_error if the element count overflows the canonical byte extent.
+    /// Complexity: O(payload size + element count) time and owned space.
+    static void write_array(const value_type& element,
+                            std::byte* destination,
+                            std::size_t count,
+                            const void* source,
+                            void (*write)(const void*, std::size_t, const value_type&, std::byte*));
+    /// Destroys an initialized tuple/record field prefix without allocating.
+    /// Precondition: count <= arity and exactly that prefix is initialized.
+    /// Complexity: O(visited ownership paths + owned descendants) time and O(1) auxiliary space.
+    static void destroy_fields(const value_type& type, std::byte* data, std::size_t count) noexcept;
 
 public:
     /// Creates source unit without allocating payload storage.
     value() noexcept;
     /// Destroys owned children and releases storage without allocating.
-    /// Complexity: O(owned payload size) time and O(shape depth) call space.
+    /// Complexity: O(visited canonical ownership paths, array nodes, and released metadata)
+    /// time and O(1) auxiliary space; destruction does not recurse with nesting depth.
     ~value();
     /// Copies all mutable payloads independently; shares only immutable metadata.
-    /// Complexity: O(owned payload size) time and space.
+    /// Complexity: O(canonical payload bytes + visited ownership paths) time and owned space.
     value(const value& other);
     /// Transfers ownership and leaves other as source unit.
     value(value&& other) noexcept;
     /// Replaces ownership with an independent copy, including self-assignment.
     /// Failure leaves this unchanged without copying its prior payload.
-    /// Complexity: O(combined payload size) time and O(source payload size) new space.
+    /// Complexity: O(canonical source bytes + visited source/old ownership paths) time
+    /// and O(source payload size) new owned space.
     value& operator=(const value& other);
     /// Releases old ownership, transfers other, and leaves other as unit; self-move is unchanged.
-    /// Complexity: O(old payload size) destruction time.
+    /// Complexity: O(visited old ownership paths, array nodes, and released metadata) time.
     value& operator=(value&& other) noexcept;
     /// Borrows the complete descriptor until this value is assigned or destroyed.
     /// Example: `value::from(true).type().kind() == type_kind::leaf`.
@@ -101,6 +126,7 @@ public:
     }
     /// Copies a sequence of exactly the specified element shape.
     /// Throws std::invalid_argument for a mismatched element, releasing earlier copies.
+    /// Throws std::overflow_error if count times canonical element extent overflows.
     /// Complexity: O(payload size + element count) time and owned space.
     /// Example: `auto empty = value::array(value_type::leaf<double>(), {});`.
     static value array(value_type element, std::span<const value> elements);
@@ -173,6 +199,12 @@ struct concrete_adapter {
         std::memcpy(bytes.data(), data, bytes.size());
         return std::bit_cast<T>(bytes);
     }
+    /// Writes a trusted leaf directly into uninitialized canonical bytes.
+    /// Complexity: O(sizeof(T)) time.
+    static void write(const T& source, const value_type&, std::byte* data) {
+        static_assert(std::is_trivially_copyable_v<T>);
+        std::memcpy(data, &source, sizeof(T));
+    }
 };
 
 /// Adapts an owning standard vector without registering its nontrivial facade as a leaf.
@@ -186,12 +218,24 @@ struct concrete_adapter<std::vector<T, Allocator>> {
     /// Copies all elements independently.
     /// Complexity: O(payload size + element count) time and space.
     static value from(const std::vector<T, Allocator>& source) {
-        std::vector<value> children;
-        children.reserve(source.size());
-        // Materialize boundary values before transferring them into the owning array.
-        for (const auto& child : source)
-            children.push_back(value::from<T>(child));
-        return value::array_owned(concrete_adapter<T>::type(), std::move(children));
+        return value::from_concrete(
+            type(), &source, [](const void* object, const value_type& shape, std::byte* data) {
+                write(*static_cast<const std::vector<T, Allocator>*>(object), shape, data);
+            });
+    }
+    /// Writes packed canonical elements without constructing public scalar boxes.
+    /// The initialized prefix owns its elements and is destroyed on failure.
+    /// Complexity: O(payload size + element count) time and owned space.
+    static void write(const std::vector<T, Allocator>& source,
+                      const value_type& shape,
+                      std::byte* data) {
+        value::write_array(shape.element(), data, source.size(), &source,
+                           [](const void* object, std::size_t index, const value_type& element,
+                              std::byte* target) {
+                               const auto& input =
+                                   *static_cast<const std::vector<T, Allocator>*>(object);
+                               concrete_adapter<T>::write(input[index], element, target);
+                           });
     }
     /// Returns a disjoint vector; throws std::invalid_argument for the wrong complete shape.
     /// Complexity: O(payload size + element count) time and space.
@@ -204,11 +248,12 @@ struct concrete_adapter<std::vector<T, Allocator>> {
     /// Complexity: O(payload size + element count) time and result space.
     static std::vector<T, Allocator> read(const value_type&, const std::byte* data) {
         std::vector<T, Allocator> result;
-        const auto children = value::array_children(data);
-        result.reserve(children.size());
+        const auto children = value::array_data(data);
+        result.reserve(children.size);
         // Extract each element through its trusted concrete adapter.
-        for (const auto& child : children)
-            result.push_back(concrete_adapter<T>::read(child.type(), value::raw_data(child)));
+        for (std::size_t i = 0; i != children.size; ++i)
+            result.push_back(concrete_adapter<T>::read(
+                children.element, children.data ? children.data + i * children.stride : nullptr));
         return result;
     }
 };
@@ -228,12 +273,33 @@ struct concrete_adapter<std::tuple<T...>> {
     /// Copies tuple fields through trusted adapters.
     /// Complexity: O(payload size + field count) time and space.
     static value from(const std::tuple<T...>& source) {
-        return std::apply(
-            [](const auto&... child) {
-                std::array<value, sizeof...(T)> fields{value::from(child)...};
-                return value::tuple_owned(fields);
-            },
-            source);
+        return value::from_concrete(
+            type(), &source, [](const void* object, const value_type& shape, std::byte* data) {
+                write(*static_cast<const std::tuple<T...>*>(object), shape, data);
+            });
+    }
+    /// Writes canonical fields in source order and destroys its prefix on failure.
+    /// Complexity: O(payload size + field count) time and owned space.
+    template <std::size_t... I>
+    static void write_fields(const std::tuple<T...>& source,
+                             const value_type& shape,
+                             std::byte* data,
+                             std::index_sequence<I...>) {
+        std::size_t completed = 0;
+        try {
+            ((concrete_adapter<T>::write(std::get<I>(source), shape.fields()[I],
+                                         data ? data + shape.offsets()[I] : nullptr),
+              ++completed),
+             ...);
+        } catch (...) {
+            value::destroy_fields(shape, data, completed);
+            throw;
+        }
+    }
+    /// Writes a tuple facade without byte-relocating it or creating scalar owners.
+    /// Complexity: O(payload size + field count) time and owned space.
+    static void write(const std::tuple<T...>& source, const value_type& shape, std::byte* data) {
+        write_fields(source, shape, data, std::index_sequence_for<T...>{});
     }
     /// Extracts source-order fields; the complete shape has already been checked.
     /// Complexity: O(payload size + field count) time and space.
