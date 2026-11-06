@@ -5,6 +5,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -69,7 +70,9 @@ TEST_CASE("reserve preserves initialized bytes through growth and realignment") 
     bytes.resize(4);
     const std::array payload{std::byte{0x11}, std::byte{0x22}, std::byte{0x33}, std::byte{0x44}};
     std::memcpy(bytes.data(), payload.data(), payload.size());
-    bytes.reserve(bytes.capacity() + 1, 64);
+    const auto growth_request = bytes.capacity() + 1;
+    bytes.reserve(growth_request, 64);
+    CHECK(bytes.capacity() >= growth_request);
     CHECK(bytes.size() == 4);
     CHECK(std::memcmp(bytes.data(), payload.data(), payload.size()) == 0);
     const auto capacity = bytes.capacity();
@@ -93,11 +96,14 @@ TEST_CASE("resize initializes growth and retains capacity on shrink") {
     bytes.resize(2);
     bytes.data()[0] = std::byte{0x55};
     bytes.data()[1] = std::byte{0x66};
-    bytes.resize(5);
-    CHECK(bytes.size() == 5);
+    const auto growth_request = bytes.capacity() + 3;
+    bytes.resize(growth_request);
+    CHECK(bytes.size() == growth_request);
+    CHECK(bytes.capacity() >= growth_request);
     CHECK(bytes.data()[0] == std::byte{0x55});
     CHECK(bytes.data()[1] == std::byte{0x66});
-    CHECK(bytes.data()[4] == std::byte{0});
+    CHECK(std::all_of(bytes.data() + 2, bytes.data() + growth_request,
+                      [](std::byte value) { return value == std::byte{0}; }));
     const auto capacity = bytes.capacity();
     bytes.resize(1);
     CHECK(bytes.capacity() == capacity);
@@ -152,12 +158,15 @@ TEST_CASE("storage holds and transfers an alignas 256 trivially copyable leaf") 
     static_assert(std::is_trivially_copyable_v<leaf>);
     cel::detail::storage bytes;
     bytes.reserve(sizeof(leaf), alignof(leaf));
+    CHECK(bytes.capacity() >= sizeof(leaf));
     bytes.resize(sizeof(leaf));
     const leaf original{0x123456789abcdef0};
     std::memcpy(bytes.data(), &original, sizeof(original));
     CHECK(reinterpret_cast<std::uintptr_t>(bytes.data()) % 256 == 0);
     CHECK(reinterpret_cast<const leaf*>(bytes.data())->value == original.value);
-    bytes.reserve(bytes.capacity() + 1, 1);
+    const auto growth_request = bytes.capacity() + 1;
+    bytes.reserve(growth_request, 1);
+    CHECK(bytes.capacity() >= growth_request);
     CHECK(reinterpret_cast<std::uintptr_t>(bytes.data()) % 256 == 0);
     CHECK(reinterpret_cast<const leaf*>(bytes.data())->value == original.value);
     leaf restored{};
