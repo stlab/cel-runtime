@@ -157,6 +157,38 @@ same-shape ownership ABIs. Results may be client leaves, nested aggregates, or
 another callable. The installed consumer exercises receipt after builders and
 the temporary compiled factory disappear.
 
+`value_type::callable(parameters, result)` describes a semantic signature
+without ownership operations. Use `bind_runtime_ownership(type)` when checked
+emission needs a runtime ownership-capable descriptor without a function body,
+including empty typed arrays of callables:
+
+```cpp
+const auto declared = cel::value_type::callable(
+    {}, cel::value_type::leaf<double>());
+const auto bound = cel::bind_runtime_ownership(declared);
+cel::dyn_segment builder;
+builder.make_array(0, bound, {});
+cel::raw_stack stack;
+auto empty = std::move(builder).finish().execute(stack, {});
+// empty.size() == 0; declared.owns_values() == false.
+```
+
+Binding traverses the complete immutable metadata graph, including callable
+results, arrays, tuples, and nominal records. It preserves semantic identity,
+layout, names, ordering, and parameter admission; client leaves and callables
+do not become valid parameters. Already canonical owners remain compatible,
+and unchanged metadata stays shared. Foreign installed callable operations
+anywhere in the graph throw `std::invalid_argument` rather than being replaced.
+No owner operation executes.
+
+The returned descriptor is a *capability witness*, not an initialized callable,
+executable body, or permission to treat arbitrary bytes as live values.
+The original declaration remains unbound, and checked emission still rejects
+it. Repeated binding is representation-compatible. Binding uses iterative
+memoized postorder and nonrecursive cleanup, with expected O(V + E + S) time
+and auxiliary space for distinct metadata nodes V, edges E, and copied name
+bytes S. Allocation failures propagate and leave the original graph unchanged.
+
 Callable copies are *reference-semantic handles*: aliases share frozen code,
 callback references, and entry state, not independently copied mutable
 callback captures. Same-carrier entry through an alias throws

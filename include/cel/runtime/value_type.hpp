@@ -170,5 +170,24 @@ struct record_field {
     value_type type;  ///< Retains the complete field descriptor.
 };
 
+/// Returns a runtime ownership-capable witness for the complete immutable type graph.
+/// Preserves semantic identity, layout, names, ordering, parameter admission, and results.
+/// Binds deferred callables, including nested results, to the runtime's canonical carrier
+/// operations; retains already canonical owners and shares unchanged metadata.
+/// The input remains unchanged. Binding creates no live callable, body, or initialized bytes
+/// and invokes no ownership operations. Repeated binding is representation-compatible.
+/// Throws std::invalid_argument for foreign or incompatible installed callable operations
+/// anywhere in the graph. Allocation failures propagate without changing the input.
+/// Complexity: expected O(V + E + S) time and auxiliary space for V distinct metadata nodes,
+/// E edges, and S copied name bytes; traversal and cleanup use no native recursion.
+/// Example (with `<cel/runtime.hpp>`):
+/// @code
+/// auto fn = cel::bind_runtime_ownership(
+///     cel::value_type::callable({}, cel::value_type::leaf<double>()));
+/// cel::dyn_segment builder;
+/// builder.make_array(0, fn, {});
+/// @endcode
+value_type bind_runtime_ownership(const value_type& type);
+
 } // namespace cel
 #endif

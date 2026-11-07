@@ -53,6 +53,33 @@ int main() try {
     if (fn.call(stack, std::array{cel::value::from(4.0)}).as<double>() != 5.0) return 3;
     auto alias = cel::callable::from_value(fn.to_value());
     if (alias.call(stack, std::array{cel::value::from(8.0)}).as<double>() != 9.0) return 4;
+    const auto declared = cel::value_type::callable(std::array{cel::value_type::leaf<double>()},
+                                                    cel::value_type::leaf<double>());
+    const auto bound = cel::bind_runtime_ownership(declared);
+    if (declared.owns_values() || !bound.owns_values() || !bound.compatible_with(fn.type()) ||
+        !cel::bind_runtime_ownership(bound).compatible_with(bound))
+        return 10;
+    auto empty = [&] {
+        const auto higher = cel::value_type::callable({}, declared);
+        const auto record = cel::value_type::record(
+            "empty", std::array{cel::record_field{"factory", higher},
+                                cel::record_field{"functions", cel::value_type::array(declared)}});
+        cel::dyn_segment builder;
+        builder.make_array(0, cel::bind_runtime_ownership(record), {});
+        return std::move(builder).finish().execute(stack, {});
+    }();
+    auto empty_copy = empty;
+    if (empty.size() != 0 || empty_copy.size() != 0 ||
+        !empty_copy.type().element().fields()[0].result().compatible_with(fn.type()))
+        return 11;
+    cel::dyn_segment populated;
+    populated.just(fn.to_value());
+    populated.make_array(1, bound, {});
+    auto functions = std::move(populated).finish().execute(stack, {});
+    if (cel::callable::from_value(functions.at(0))
+            .call(stack, std::array{cel::value::from(6.0)})
+            .as<double>() != 7.0)
+        return 12;
     if (stack.cursor() != cursor || stack.depth() != depth || !stack.pop<bool>()) return 5;
     return stack.depth() == 0 ? 0 : 6;
 } catch (...) {

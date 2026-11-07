@@ -2,7 +2,7 @@
 #include "allocation_probe.hpp"
 #include "type_ops.hpp"
 #include "value_ops.hpp"
-#include <cel/runtime/callable.hpp>
+#include <cel/runtime.hpp>
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <array>
 #include <doctest/doctest.h>
@@ -38,6 +38,218 @@ void acquisition_reentry() {
         (void)acquisition_callable->call(*acquisition_stack, {});
     } catch (const std::logic_error&) {
         acquisition_rejected = true;
+    }
+}
+TEST_CASE("runtime ownership binding preserves deferred signatures and canonical witnesses") {
+    const auto number = cel::value_type::leaf<double>();
+    const auto declared = cel::value_type::callable(std::array{number}, number);
+    const auto bound = cel::bind_runtime_ownership(declared);
+    cel::dyn_segment body;
+    body.push_argument(0, number);
+    cel::callable actual(std::move(body).finish(), std::array{number});
+    CHECK_FALSE(declared.owns_values());
+    CHECK(bound.owns_values());
+    CHECK(bound.same_shape(declared));
+    CHECK(bound.compatible_with(actual.type()));
+    CHECK_FALSE(declared.compatible_with(actual.type()));
+    CHECK(cel::bind_runtime_ownership(bound).compatible_with(bound));
+    CHECK(cel::detail::type_access::same_plan(cel::bind_runtime_ownership(bound), bound));
+    CHECK(cel::detail::type_access::same_plan(cel::bind_runtime_ownership(actual.type()),
+                                              actual.type()));
+    CHECK_THROWS_AS(cel::value_type::callable(std::array{bound}, number), std::invalid_argument);
+}
+TEST_CASE("bound empty callable arrays retain ownership beyond compiler metadata lifetimes") {
+    const auto declared = cel::value_type::callable({}, cel::value_type::leaf<double>());
+    cel::dyn_segment rejected;
+    CHECK_THROWS_AS(rejected.make_array(0, declared, {}), std::invalid_argument);
+    const auto compile = [&] {
+        cel::dyn_segment builder;
+        builder.make_array(0, cel::bind_runtime_ownership(declared), {});
+        return std::move(builder).finish();
+    };
+    cel::raw_stack stack;
+    auto result = compile().execute(stack, {});
+    auto copied = result;
+    CHECK(result.size() == 0);
+    CHECK(copied.size() == 0);
+    CHECK(copied.type().owns_values());
+    cel::dyn_segment literal;
+    literal.just(copied);
+    CHECK(std::move(literal).finish().execute(stack, {}).size() == 0);
+    cel::dyn_segment unowned_literal;
+    CHECK_THROWS_AS(unowned_literal.just(cel::value::array(declared, {})), std::invalid_argument);
+    cel::dyn_segment closure_body;
+    closure_body.just(result);
+    cel::callable factory(std::move(closure_body).finish(), {});
+    CHECK(factory.call(stack, {}).size() == 0);
+}
+TEST_CASE("binding preserves nested nominal layout client identities and range forms") {
+    const auto declared = cel::value_type::callable({}, cel::value_type::leaf<double>());
+    const auto client = cel::value_type::leaf<wide_result>();
+    const auto range =
+        cel::value_type::range(cel::range_kind::range_inclusive, cel::value_type::leaf<double>());
+    const auto tuple = cel::value_type::tuple(std::array{client, declared, range});
+    const auto record = cel::value_type::record(
+        "named", std::array{cel::record_field{"nested", cel::value_type::array(tuple)},
+                            cel::record_field{"wide", client}});
+    const auto bound = cel::bind_runtime_ownership(record);
+    CHECK_FALSE(record.owns_values());
+    CHECK(bound.owns_values());
+    CHECK(bound.same_shape(record));
+    CHECK(bound.record_identity() == "named");
+    CHECK(bound.field_names()[0] == "nested");
+    CHECK(bound.field_names()[1] == "wide");
+    CHECK(bound.offsets()[0] == record.offsets()[0]);
+    CHECK(bound.offsets()[1] == record.offsets()[1]);
+    CHECK(bound.byte_layout().alignment == 256);
+    CHECK(bound.fields()[1].leaf_identity() == typeid(wide_result));
+    CHECK(cel::detail::type_access::same_plan(bound.fields()[1], client));
+    CHECK(bound.fields()[0].element().fields()[2].form() == cel::range_kind::range_inclusive);
+    CHECK_THROWS_AS(cel::value_type::callable(std::array{bound}, client), std::invalid_argument);
+    cel::dyn_segment builder;
+    builder.make_array(0, bound, {});
+    cel::raw_stack stack;
+    CHECK(std::move(builder).finish().execute(stack, {}).size() == 0);
+}
+TEST_CASE("binding covers higher order result witnesses and populated callable arrays") {
+    const auto number = cel::value_type::leaf<double>();
+    const auto inner_type = cel::value_type::callable({}, number);
+    const auto higher = cel::value_type::callable({}, inner_type);
+    const auto bound = cel::bind_runtime_ownership(higher);
+    CHECK(bound.result().owns_values());
+    CHECK_FALSE(higher.result().owns_values());
+    cel::dyn_segment inner;
+    inner.just(cel::value::from(7.0));
+    cel::dyn_segment outer;
+    outer.push_closure(std::move(inner).finish(), {});
+    cel::callable actual(std::move(outer).finish(), {});
+    CHECK(bound.compatible_with(actual.type()));
+    CHECK(bound.result().compatible_with(actual.type().result()));
+    cel::raw_stack stack;
+    CHECK(cel::callable::from_value(actual.call(stack, {})).call(stack, {}).as<double>() == 7.0);
+    cel::dyn_segment populated;
+    populated.just(actual.to_value());
+    populated.make_array(1, bound, {});
+    auto array = std::move(populated).finish().execute(stack, {});
+    CHECK(array.size() == 1);
+    CHECK(cel::callable::from_value(cel::callable::from_value(array.at(0)).call(stack, {}))
+              .call(stack, {})
+              .as<double>() == 7.0);
+    const auto result_record = cel::value_type::record(
+        "result", std::array{cel::record_field{"functions", cel::value_type::array(higher)}});
+    const auto complete = cel::bind_runtime_ownership(cel::value_type::callable({}, result_record));
+    CHECK(complete.result().owns_values());
+    CHECK(complete.result().fields()[0].element().result().owns_values());
+    cel::dyn_segment empty;
+    empty.make_array(0, bound, {});
+    CHECK(std::move(empty).finish().execute(stack, {}).size() == 0);
+}
+TEST_CASE("binding rejects foreign operations throughout metadata without invoking owners") {
+    const auto declared = cel::value_type::callable({}, cel::value_type::leaf<double>());
+    const auto foreign = cel::detail::type_access::install_callable_ownership(
+        declared, {clone_foreign, destroy_foreign});
+    cel::dyn_segment body;
+    body.just(cel::value::from(7.0));
+    cel::callable actual(std::move(body).finish(), {});
+    const auto aggregate = cel::value_type::tuple(std::array{cel::value_type::array(foreign)});
+    const auto nested = cel::value_type::callable({}, aggregate);
+    const auto installed_nested = cel::detail::type_access::install_callable_ownership(
+        nested, cel::detail::type_access::operations(actual.type()));
+    const auto mixed = cel::detail::type_access::install_callable_ownership(
+        declared, {cel::detail::type_access::operations(actual.type()).clone, destroy_foreign});
+    foreign_clones = 0;
+    foreign_destroys = 0;
+    for (const auto& input : std::array{foreign, aggregate, nested, installed_nested, mixed}) {
+        CHECK_THROWS_AS(cel::bind_runtime_ownership(input), std::invalid_argument);
+    }
+    CHECK(cel::detail::type_access::operations(foreign).clone == clone_foreign);
+    CHECK(cel::detail::type_access::operations(foreign).destroy == destroy_foreign);
+    CHECK(foreign_clones == 0);
+    CHECK(foreign_destroys == 0);
+}
+TEST_CASE("binding traverses deep metadata and preserves shared DAGs") {
+    auto deep = cel::value_type::callable({}, cel::value_type::leaf<double>());
+    for (int i = 0; i != 12000; ++i)
+        deep = cel::value_type::callable({}, cel::value_type::array(deep));
+    auto bound = cel::bind_runtime_ownership(deep);
+    CHECK(bound.same_shape(deep));
+    for (int i = 0; i != 12000; ++i) {
+        REQUIRE(bound.owns_values());
+        REQUIRE(bound.result().owns_values());
+        bound = bound.result().element();
+    }
+    CHECK(bound.owns_values());
+    auto shared = cel::value_type::callable({}, cel::value_type::leaf<double>());
+    constexpr int depth = 96;
+    for (int i = 0; i != depth; ++i) {
+        const auto edge = cel::value_type::array(shared);
+        shared = cel::value_type::tuple(std::array{edge, edge});
+    }
+    auto result = [&] {
+        allocation_probe probe;
+        return cel::bind_runtime_ownership(shared);
+    }();
+    CHECK(allocation_count < 64 * static_cast<std::size_t>(depth + 1));
+    CHECK(result.same_shape(shared));
+    for (int i = 0; i != depth; ++i) {
+        REQUIRE(result.owns_values());
+        CHECK(cel::detail::type_access::same_plan(result.fields()[0], result.fields()[1]));
+        result = result.fields()[0].element();
+    }
+    CHECK(result.owns_values());
+}
+TEST_CASE(
+    "binding allocation failures preserve original descriptors and reclaim partial metadata") {
+    const auto declared = cel::value_type::callable({}, cel::value_type::leaf<double>());
+    const auto input = cel::value_type::record(
+        "failure", std::array{cel::record_field{"first", cel::value_type::array(declared)},
+                              cel::record_field{"second", declared}});
+    const auto saved = input;
+    {
+        allocation_probe probe;
+        (void)cel::bind_runtime_ownership(input);
+    }
+    const auto allocations = allocation_count;
+    REQUIRE(allocations > 0);
+    REQUIRE(allocations < 1000);
+    for (int budget = 0; budget != static_cast<int>(allocations); ++budget) {
+        bool failed = false;
+        {
+            allocation_failure_probe failure(budget);
+            try {
+                (void)cel::bind_runtime_ownership(input);
+            } catch (const std::bad_alloc&) {
+                failed = true;
+            }
+        }
+        CHECK(failed);
+        CHECK_FALSE(input.owns_values());
+        CHECK(cel::detail::type_access::same_plan(input, saved));
+        CHECK(cel::bind_runtime_ownership(input).owns_values());
+    }
+    auto deep = input;
+    for (int i = 0; i != 4000; ++i)
+        deep = cel::value_type::array(deep);
+    {
+        allocation_probe probe;
+        (void)cel::bind_runtime_ownership(deep);
+    }
+    const auto deep_allocations = allocation_count;
+    REQUIRE(deep_allocations > 0);
+    REQUIRE(deep_allocations < 100000);
+    for (int budget : {0, static_cast<int>(deep_allocations - 1)}) {
+        bool failed = false;
+        {
+            allocation_failure_probe failure(budget);
+            try {
+                (void)cel::bind_runtime_ownership(deep);
+            } catch (const std::bad_alloc&) {
+                failed = true;
+            }
+        }
+        CHECK(failed);
+        CHECK_FALSE(deep.owns_values());
+        CHECK(cel::bind_runtime_ownership(deep).owns_values());
     }
 }
 TEST_CASE("callable full declarations include unused composite parameters") {

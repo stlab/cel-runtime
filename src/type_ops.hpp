@@ -35,6 +35,13 @@ struct type_access {
     /// Complexity: O(parameter count) time and metadata space; nested descriptors stay shared.
     static value_type install_callable_ownership(const value_type& signature,
                                                  opaque_ownership operations);
+    /// Binds every deferred callable in an immutable metadata DAG to the supplied canonical pair.
+    /// Precondition: canonical supplies the runtime's complete clone/destruction pair.
+    /// Rejects foreign installed operations with std::invalid_argument without invoking them.
+    /// Preserves source metadata and parameter/layout/resource invariants; shares unchanged nodes.
+    /// Allocation failures propagate; partial metadata is safely released without recursion.
+    /// Complexity: expected O(V + E + S) time and space for distinct nodes, edges, copied names.
+    static value_type bind_runtime_ownership(const value_type& type, opaque_ownership canonical);
     /// Returns the installed pair, or an empty pair for a deferred callable.
     /// Precondition: type is callable.
     static opaque_ownership operations(const value_type& type) noexcept;

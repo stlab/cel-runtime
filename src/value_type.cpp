@@ -9,6 +9,7 @@
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -63,6 +64,81 @@ value_type type_access::install_callable_ownership(const value_type& signature,
     plan->operations = operations;
     plan->owns = true;
     return value_type(std::move(plan));
+}
+
+value_type type_access::bind_runtime_ownership(const value_type& type, opaque_ownership canonical) {
+    assert(canonical.clone && canonical.destroy);
+    /// Retains the next child to visit in one borrowed source plan.
+    struct visit {
+        const value_type* type; ///< Borrows a descriptor owned by the input graph.
+        std::size_t next = 0;   ///< Counts already scheduled child edges.
+    };
+    std::vector<visit> pending{{&type}};
+    std::unordered_map<const type_plan*, value_type> bound;
+    // Memoized iterative postorder processes each node only after its children.
+    while (!pending.empty()) {
+        auto& current = pending.back();
+        const auto* source = current.type->_plan.get();
+        const auto children =
+            source->fields.size() + source->element.has_value() + source->result.has_value();
+        if (current.next != children) {
+            const auto index = current.next++;
+            const value_type* child = nullptr;
+            if (index < source->fields.size()) {
+                child = &source->fields[index];
+            } else if (index == source->fields.size() && source->element) {
+                child = &*source->element;
+            } else {
+                assert(source->result);
+                child = &*source->result;
+            }
+            if (!bound.contains(child->_plan.get())) pending.push_back({child});
+            continue;
+        }
+        bool changed = false;
+        if (source->kind == type_kind::callable) {
+            const auto operations = source->operations;
+            if (operations.clone || operations.destroy) {
+                if (operations.clone != canonical.clone || operations.destroy != canonical.destroy)
+                    throw std::invalid_argument("foreign callable ownership operations");
+            } else {
+                changed = true;
+            }
+        }
+        const auto transformed = [&](const value_type& child) -> const value_type& {
+            return bound.at(child._plan.get());
+        };
+        const auto child_changed = [&](const value_type& child) {
+            return !same_plan(child, transformed(child));
+        };
+        changed =
+            changed || std::any_of(source->fields.begin(), source->fields.end(), child_changed);
+        if (source->element) changed = changed || child_changed(*source->element);
+        if (source->result) changed = changed || child_changed(*source->result);
+        if (!changed) {
+            bound.emplace(source, *current.type);
+        } else {
+            auto plan = std::make_shared<type_plan>(*source);
+            std::transform(source->fields.begin(), source->fields.end(), plan->fields.begin(),
+                           transformed);
+            if (source->element) plan->element = transformed(*source->element);
+            if (source->result) plan->result = transformed(*source->result);
+            if (plan->kind == type_kind::callable) {
+                plan->operations = canonical;
+                plan->owns = true;
+            } else if (plan->kind == type_kind::array) {
+                assert(plan->element);
+                plan->owns = plan->element->owns_values();
+            } else if (plan->kind == type_kind::tuple || plan->kind == type_kind::record) {
+                plan->owns =
+                    std::all_of(plan->fields.begin(), plan->fields.end(),
+                                [](const value_type& field) { return field.owns_values(); });
+            }
+            bound.emplace(source, value_type(std::move(plan)));
+        }
+        pending.pop_back();
+    }
+    return bound.at(type._plan.get());
 }
 
 opaque_ownership type_access::operations(const value_type& type) noexcept {

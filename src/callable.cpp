@@ -57,6 +57,10 @@ void callable_invocation::call_into(raw_stack& stack,
 }
 } // namespace cel::detail
 namespace cel {
+value_type bind_runtime_ownership(const value_type& type) {
+    return detail::type_access::bind_runtime_ownership(
+        type, {detail::clone_callable, detail::destroy_callable});
+}
 callable::callable(compiled_segment body, std::span<const value_type> parameters) {
     auto signature = value_type::callable(parameters, body.result_type());
     detail::require_ownership(body.result_type());

@@ -14,7 +14,7 @@ Canonical storage, ownership plans, frame access, and already-entered dispatch
 bridges remain private implementation details.
 
 The checked callable entry spans acquisition through guarded cleanup.
-Public signatures remain those accepted before packaging. See
+Semantic declarations remain distinct from runtime ownership-capable witnesses. See
 [Choose execution and ownership boundaries](execution.md) for caller
 contracts and [the parity ledger](parity.md) for test/source evidence and
 deliberate Rust differences.
@@ -55,6 +55,13 @@ The parser integration must preserve these runtime requirements:
    preserves shared-DAG comparison costs, and propagates allocation failures.
    `same_shape` remains a semantic comparison. Compatibility alone does not
    prove installed ownership or initialized borrowed canonical data.
+10. Use `bind_runtime_ownership(type)` for admitted typed empty composites whose
+    complete semantic descriptors contain deferred callables. It binds the
+    full immutable DAG, including nested callable results, without bodies or
+    owner effects and preserves layout, identities, and parameter admission.
+    It rejects foreign installed operations. Keep `value_type::callable`
+    semantic and unbound; do not manufacture dummy functions or bypass checked
+    ownership admission for empty values.
 
 The runtime does not implement registry lookup, temporary/persistent scope
 ordering, registered built-in overloads, lexical adapters, grammar, or source
