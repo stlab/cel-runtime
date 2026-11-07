@@ -196,6 +196,7 @@ class dyn_segment {
     stack_requirements _requirements;      ///< Retains committed intermediate storage peaks.
     /// Validates the ordered suffix and reserves metadata before opcode publication.
     /// Throws invalid_argument for underflow, incompatible operands, or absent ownership.
+    /// Throws std::overflow_error for canonical frame extent or depth overflow.
     /// Complexity: O(arity + distinct compared metadata pairs) time and auxiliary space,
     /// plus O(current stack depth) metadata transfer on capacity growth.
     detail::construction_effect check_operation(std::span<const value_type> inputs,
@@ -224,12 +225,14 @@ public:
     /// Emits an owned clone of a borrowed positional input.
     /// Repeated declarations must have identical complete shapes and ownership plans.
     /// Throws invalid_argument for incompatible repeated declarations or missing clone capability.
+    /// Throws std::overflow_error for canonical frame extent or depth overflow.
     /// Complexity: O(emitted read count + compared metadata) construction time,
     /// plus O(current stack depth) metadata transfer on capacity growth.
     /// Example: `builder.push_argument(0, value_type::leaf<double>());`.
     void push_argument(std::size_t index, value_type type);
     /// Retains a literal owner and emits an independent clone on every execution.
     /// Throws invalid_argument if the complete value cannot be cloned.
+    /// Throws std::overflow_error for canonical frame extent or depth overflow.
     /// Complexity: O(metadata admission) time, plus O(current stack depth) metadata transfer
     /// on capacity growth; retains one owner.
     /// Example: `builder.just(value::from(true));`.
@@ -243,6 +246,7 @@ public:
     /// Callbacks return R or a reference to R; no implicit result conversion is admitted.
     /// Callbacks may reference caller-owned state; freezing does not make it thread-safe.
     /// Throws invalid_argument for current stack mismatch before publishing an opcode.
+    /// Throws std::overflow_error for canonical frame extent or depth overflow.
     /// Complexity: O(arity + compared metadata + capture construction) time,
     /// plus O(current stack depth) metadata transfer on capacity growth.
     /// Example: `builder.op<double, double>([](double n) { return n * 2.0; });`.
