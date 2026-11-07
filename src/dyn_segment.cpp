@@ -16,7 +16,7 @@
 namespace cel::detail {
 /// Owns checked instructions and their complete frozen boundary requirements.
 /// Shared handles have reference semantics; captures are never shallow value-copied.
-struct frozen_program {
+struct frozen_program : retirement_node {
     raw_segment body;                 ///< Owns stable captures and const dispatch records.
     std::vector<argument_read> reads; ///< Retains each declared positional clone requirement.
     value_type result;                ///< Retains the single final owner plan.
@@ -28,9 +28,47 @@ struct frozen_program {
                    value_type output,
                    stack_requirements required,
                    stack_origin ambient) :
-        body(std::move(input)), reads(std::move(arguments)), result(std::move(output)),
-        requirements(required), origin(ambient) {}
+        retirement_node(dispose_program), body(std::move(input)), reads(std::move(arguments)),
+        result(std::move(output)), requirements(required), origin(ambient) {}
+    /// Detaches the owned arena before deleting ordinary immutable metadata.
+    static void dispose_program(retirement_node& base, retirement_queue& queue) noexcept {
+        auto& program = static_cast<frozen_program&>(base);
+        segment_access::retire(program.body, queue);
+        delete &program;
+    }
 };
+/// Retains a canonical literal and detaches its runtime-owned children before capture deletion.
+struct literal_instruction {
+    value literal; ///< Owns one complete literal, independent of execution results.
+    /// Pushes an independent clone onto the caller's frame.
+    /// Complexity: O(canonical payload and ownership work).
+    void operator()(frame& scope) const { scope.push_clone(literal); }
+    /// Retires literal ownership into the enclosing executable worklist.
+    /// Complexity: O(canonical ownership paths and array nodes); no allocation.
+    void retire(retirement_queue& queue) noexcept { value_access::retire(literal, queue); }
+};
+/// Shares both immutable branches and exposes their managed ownership edges for retirement.
+struct branch_instruction {
+    retirement_ptr<const frozen_program> yes; ///< Retains the selected-true body.
+    retirement_ptr<const frozen_program> no;  ///< Retains the selected-false body.
+    /// Executes only the body selected by the consumed boolean.
+    /// Complexity: O(selected body execution work).
+    void operator()(frame& scope) const {
+        const bool condition = scope.pop<bool>();
+        (condition ? yes->body : no->body).execute(scope);
+    }
+    /// Retires both body references into one local last-owner operation.
+    void retire(retirement_queue& queue) noexcept {
+        yes.retire(queue);
+        no.retire(queue);
+    }
+};
+void segment_access::retire(cel::compiled_segment& segment, retirement_queue& queue) noexcept {
+    segment._program.retire(queue);
+}
+void segment_access::retire(cel::prepared_raw_segment& segment, retirement_queue& queue) noexcept {
+    segment._program.retire(queue);
+}
 const std::byte* canonical_data(const value& source) noexcept { return value_access::data(source); }
 result_storage::result_storage(const prepared_raw_segment& binding) :
     _binding(binding), _data(nullptr) {
@@ -125,8 +163,7 @@ void dyn_segment::just(value literal) {
     const auto type = literal.type();
     const std::array outputs{type};
     const auto effect = check_operation({}, outputs);
-    detail::segment_access::append(
-        _body, [literal = std::move(literal)](frame& scope) { scope.push_clone(literal); });
+    detail::segment_access::append(_body, detail::literal_instruction{std::move(literal)});
     apply_operation(0, outputs, effect);
 }
 stack_origin dyn_segment::snapshot() const {
@@ -338,10 +375,8 @@ void dyn_segment::if_else(dyn_segment then_body, dyn_segment else_body) {
     }
     auto yes = std::move(then_body).finish();
     auto no = std::move(else_body).finish();
-    detail::segment_access::append(_body, [yes = std::move(yes), no = std::move(no)](frame& scope) {
-        const bool condition = scope.pop<bool>();
-        (condition ? yes._program->body : no._program->body).execute(scope);
-    });
+    detail::segment_access::append(
+        _body, detail::branch_instruction{std::move(yes._program), std::move(no._program)});
     _reads.swap(reads);
     apply_operation(1, outputs, effect);
 }
@@ -418,15 +453,16 @@ void dyn_segment::invoke_closure(std::size_t arity) {
 compiled_segment dyn_segment::finish() && {
     if (_stack.size() > 1) throw std::invalid_argument("final stack has more than one result");
     if (_stack.empty()) just(value{});
-    auto program = std::make_shared<const detail::frozen_program>(
-        std::move(_body), std::move(_reads), _stack.back(), _requirements, _origin);
+    auto program = detail::retirement_ptr<const detail::frozen_program>(new detail::frozen_program(
+        std::move(_body), std::move(_reads), _stack.back(), _requirements, _origin));
     _stack.clear();
     _end_cursors.clear();
     _known_calls.clear();
     _requirements = {};
     return compiled_segment(std::move(program));
 }
-compiled_segment::compiled_segment(std::shared_ptr<const detail::frozen_program> program) noexcept :
+compiled_segment::compiled_segment(
+    detail::retirement_ptr<const detail::frozen_program> program) noexcept :
     _program(std::move(program)) {}
 const value_type& compiled_segment::result_type() const noexcept {
     assert(_program);
@@ -470,9 +506,10 @@ prepared_raw_segment compiled_segment::prepare_raw(std::span<const value_type> a
     }
     return prepared_raw_segment(_program, arguments, result);
 }
-prepared_raw_segment::prepared_raw_segment(std::shared_ptr<const detail::frozen_program> program,
-                                           std::span<const value_type> arguments,
-                                           value_type result) :
+prepared_raw_segment::prepared_raw_segment(
+    detail::retirement_ptr<const detail::frozen_program> program,
+    std::span<const value_type> arguments,
+    value_type result) :
     _program(std::move(program)), _arguments(arguments.begin(), arguments.end()),
     _result(std::move(result)), _used(arguments.size(), false) {
     // Freeze which input positions need materialization in typed convenience calls.

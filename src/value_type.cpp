@@ -175,13 +175,12 @@ bool type_access::compare_plans(const value_type& expected,
             if (a->operations.clone != b->operations.clone ||
                 a->operations.destroy != b->operations.destroy)
                 return false;
-            continue;
         } else if (a->kind == type_kind::leaf || a->kind == type_kind::range) {
             continue;
         }
         if (a->element && b->element)
             pending.emplace_back(a->element->_plan.get(), b->element->_plan.get());
-        if (semantic && a->result && b->result)
+        if (a->result && b->result)
             pending.emplace_back(a->result->_plan.get(), b->result->_plan.get());
         // Retain only borrowed graph edges; root descriptors own all reachable plans.
         for (std::size_t i = 0; i != a->fields.size(); ++i)

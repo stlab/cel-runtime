@@ -116,10 +116,18 @@ ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
   ctest --test-dir build/sanitized --output-on-failure
 ```
 
-All 15 CTests, including six compile-fail gates, the runnable example, and
+All 16 CTests, including six compile-fail gates, the runnable example, and
 installed consumption, pass in Debug, Release, supported ASan+UBSan, and
 clang-tidy configurations. Compiler output is warning-free, formatting passes,
 and strict Doxygen passes. Explicit owner counters supplement sanitizer
 cleanup checks. macOS LeakSanitizer is unsupported and disabled; it is not a
 passed gate. GCC, MSVC, other platforms, and remote generated CI have not run
 locally. No hosting location is selected, and nothing has been published.
+
+The final integrated correction adds depth-12000 executable retirement
+regressions and rejects higher-order foreign result ownership before effects
+or raw preparation. Runtime-managed literals, array/tuple children, and lazy
+bodies retire through one nonallocating last-owner worklist; shared code and
+invocation guards retain their original semantics. The session's
+`final-fix-wave-report.md` records the corrected package inputs and RED/GREEN
+evidence.

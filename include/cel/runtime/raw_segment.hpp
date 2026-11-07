@@ -2,6 +2,7 @@
 #ifndef CEL_RUNTIME_RAW_SEGMENT_HPP
 #define CEL_RUNTIME_RAW_SEGMENT_HPP
 #include <array>
+#include <cel/runtime/detail/retirement.hpp>
 #include <cel/runtime/raw_stack.hpp>
 #include <functional>
 #include <memory>
@@ -23,7 +24,7 @@ struct segment_access;
 /// Example: `raw_segment p; p.push_op0<double>([](frame&) { return 2.0; });
 /// raw_stack s; frame f(s); p.execute(f); auto n = f.pop<double>();`.
 class raw_segment {
-    std::unique_ptr<detail::instruction_storage> _storage;
+    detail::retirement_ptr<detail::instruction_storage> _storage;
     friend struct detail::segment_access;
 
     /// Allocates stable, aligned capture storage using a standard arena.
@@ -32,7 +33,8 @@ class raw_segment {
     /// Failure leaves ownership with the caller; complexity is amortized O(1).
     void append(const void* capture,
                 void (*execute)(const void*, frame&),
-                void (*destroy)(const void*) noexcept);
+                void (*destroy)(const void*) noexcept,
+                void (*retire)(const void*, detail::retirement_queue&) noexcept = nullptr);
 
     /// Owns typed argument/result metadata and a real C++ capture object.
     template <class F, class R, class... Args>

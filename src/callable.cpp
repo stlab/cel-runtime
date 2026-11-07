@@ -1,19 +1,26 @@
 // SPDX-License-Identifier: BSL-1.0
 #include "callable_access.hpp"
 #include "canonical.hpp"
+#include "instruction.hpp"
 #include "type_ops.hpp"
 #include <cassert>
 #include <stdexcept>
 
 namespace cel::detail {
 /// Owns one immutable body/signature plus its exclusive recursive-entry state.
-struct callable_state {
+struct callable_state : retirement_node {
     prepared_raw_segment body; ///< Retains frozen code and full bound parameters.
     value_type signature;      ///< Retains the installed ownership representation.
     bool active = false;       ///< Rejects recursive entry into this shared carrier.
     /// Transfers the complete prevalidated binding.
     callable_state(prepared_raw_segment input, value_type type) :
-        body(std::move(input)), signature(std::move(type)) {}
+        retirement_node(dispose_state), body(std::move(input)), signature(std::move(type)) {}
+    /// Retires the prepared executable edge before deleting its guard and descriptors.
+    static void dispose_state(retirement_node& base, retirement_queue& queue) noexcept {
+        auto& state = static_cast<callable_state&>(base);
+        segment_access::retire(state.body, queue);
+        delete &state;
+    }
 };
 /// Carries one owned facade pointer, never a byte-relocated public callable.
 struct callable_carrier {
@@ -50,6 +57,11 @@ callable_invocation::callable_invocation(callable code) : _code(std::move(code))
     _code._state->active = true;
 }
 callable_invocation::~callable_invocation() noexcept { _code._state->active = false; }
+void callable_access::retire(std::byte* bytes, retirement_queue& queue) noexcept {
+    auto& owner = const_cast<callable&>(read(bytes));
+    owner._state.retire(queue);
+    delete &owner;
+}
 void callable_invocation::call_into(raw_stack& stack,
                                     std::span<const borrowed_value> arguments,
                                     std::byte* destination) const {
@@ -67,7 +79,8 @@ callable::callable(compiled_segment body, std::span<const value_type> parameters
     auto binding = body.prepare_raw(parameters, body.result_type());
     signature = detail::type_access::install_callable_ownership(
         signature, {detail::clone_callable, detail::destroy_callable});
-    _state = std::make_shared<detail::callable_state>(std::move(binding), std::move(signature));
+    _state = detail::retirement_ptr<detail::callable_state>(
+        new detail::callable_state(std::move(binding), std::move(signature)));
 }
 callable::~callable() = default;
 const value_type& callable::type() const noexcept {

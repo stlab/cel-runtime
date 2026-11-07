@@ -24,9 +24,9 @@ cpp_library_setup(
     DESCRIPTION "Owned values, canonical layouts, and explicit raw execution for CEL"
     NAMESPACE cel
     REQUIRES_CPP_VERSION 20
-    HEADERS runtime.hpp runtime/layout.hpp runtime/value_type.hpp runtime/value.hpp runtime/raw_stack.hpp runtime/raw_segment.hpp runtime/dyn_segment.hpp runtime/segment.hpp runtime/callable.hpp
+    HEADERS runtime.hpp runtime/layout.hpp runtime/value_type.hpp runtime/value.hpp runtime/raw_stack.hpp runtime/raw_segment.hpp runtime/dyn_segment.hpp runtime/segment.hpp runtime/callable.hpp runtime/detail/retirement.hpp
     SOURCES storage.cpp value_type.cpp value.cpp raw_stack.cpp raw_segment.cpp dyn_segment.cpp callable.cpp
-    TESTS storage_test.cpp value_test.cpp resource_test.cpp raw_execution_test.cpp segment_test.cpp composite_execution_test.cpp callable_test.cpp nontrivial_leaf_fail.cpp typed_operand_fail.cpp static_operand_fail.cpp overloaded_operand_fail.cpp generic_conversion_fail.cpp nondeduced_generic_fail.cpp
+    TESTS storage_test.cpp value_test.cpp resource_test.cpp raw_execution_test.cpp segment_test.cpp composite_execution_test.cpp callable_test.cpp executable_retirement_test.cpp nontrivial_leaf_fail.cpp typed_operand_fail.cpp static_operand_fail.cpp overloaded_operand_fail.cpp generic_conversion_fail.cpp nondeduced_generic_fail.cpp
     EXAMPLES getting_started.cpp
     DOCS_INPUTS README.md docs/get-started.md docs/execution.md docs/parity.md docs/runtime-milestone.md
     DOCS_OPTIONS "USE_MDFILE_AS_MAINPAGE = ${CMAKE_CURRENT_SOURCE_DIR}/README.md"
@@ -50,6 +50,7 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}" "-DCONFIG=$<CONFIG>"
             -P "${CMAKE_CURRENT_BINARY_DIR}/installed_consumer.cmake")
     set_tests_properties(installed_consumer PROPERTIES TIMEOUT 180)
+    set_tests_properties(executable_retirement_test PROPERTIES TIMEOUT 180)
 endif()
 if(TARGET storage_test)
     target_include_directories(storage_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")

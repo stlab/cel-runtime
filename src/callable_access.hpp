@@ -36,6 +36,9 @@ struct callable_access {
     static const callable& read(const std::byte* bytes) noexcept;
     /// Reports whether the descriptor has this implementation's complete ownership pair.
     static bool installed(const value_type& type) noexcept;
+    /// Deletes a canonical carrier after releasing its state into the current worklist.
+    /// Precondition: bytes contain this implementation's exclusively owned live carrier.
+    static void retire(std::byte* bytes, retirement_queue& queue) noexcept;
 };
 } // namespace cel::detail
 #endif

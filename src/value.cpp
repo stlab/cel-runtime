@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSL-1.0
 #include <cel/runtime/value.hpp>
 
+#include "callable_access.hpp"
 #include "storage.hpp"
 #include "type_ops.hpp"
 #include "value_ops.hpp"
@@ -83,7 +84,8 @@ struct array_owner {
 void retire_resources(const value_type& type,
                       std::byte* data,
                       std::size_t count,
-                      array_owner*& pending) noexcept {
+                      array_owner*& pending,
+                      retirement_queue& queue) noexcept {
     // Cached ownership ranks skip every non-owning scalar and zero-sized subtree.
     while (count != 0) {
         const auto slot = type_access::resource(type, --count);
@@ -92,6 +94,8 @@ void retire_resources(const value_type& type,
             auto* node = read_array(address).owner;
             node->pending_next = pending;
             pending = node;
+        } else if (callable_access::installed(*slot.type)) {
+            callable_access::retire(address, queue);
         } else {
             const auto operations = type_access::operations(*slot.type);
             assert(operations.destroy);
@@ -103,18 +107,18 @@ void retire_resources(const value_type& type,
 
 /// Retires a packed array's initialized prefix without deleting the array node itself.
 /// Complexity: O(visited ownership paths) time and O(1) auxiliary space.
-void retire_elements(array_owner& owner, array_owner*& pending) noexcept {
+void retire_elements(array_owner& owner, array_owner*& pending, retirement_queue& queue) noexcept {
     const auto resources = type_access::resources(owner.element);
     const auto stride = owner.element.byte_layout().size;
     if (owner.partial_resources != 0)
         retire_resources(owner.element, byte_at(owner.bytes.data(), owner.initialized * stride),
-                         owner.partial_resources, pending);
+                         owner.partial_resources, pending, queue);
     if (resources != 0) {
         // Visit only initialized elements; scalar arrays require no per-element cleanup.
         while (owner.initialized != 0)
             retire_resources(owner.element,
                              byte_at(owner.bytes.data(), --owner.initialized * stride), resources,
-                             pending);
+                             pending, queue);
     }
     owner.initialized = 0;
     owner.partial_resources = 0;
@@ -123,21 +127,22 @@ void retire_elements(array_owner& owner, array_owner*& pending) noexcept {
 /// Deletes a worklist of retired array nodes without allocating traversal state.
 /// Nodes supply their own temporary links; descendants extend this same worklist.
 /// Complexity: O(visited ownership paths and array nodes) time and O(1) auxiliary space.
-void drain_arrays(array_owner*& pending) noexcept {
+void drain_arrays(array_owner*& pending, retirement_queue& queue) noexcept {
     // Detach each node before retiring its descendants and releasing its aligned bytes.
     while (pending) {
         auto* current = pending;
         pending = current->pending_next;
         current->pending_next = nullptr;
-        retire_elements(*current, pending);
+        retire_elements(*current, pending, queue);
         delete current;
     }
 }
 
 array_owner::~array_owner() {
+    retirement_queue queue;
     array_owner* pending = nullptr;
-    retire_elements(*this, pending);
-    drain_arrays(pending);
+    retire_elements(*this, pending, queue);
+    drain_arrays(pending, queue);
 }
 
 /// Clones a fixed-extent carrier prefix and queues packed descendants for iterative cloning.
@@ -210,17 +215,22 @@ void clone_payload(const value_type& type, const std::byte* source, std::byte* d
             current->clone_source = nullptr;
         }
     } catch (...) {
+        retirement_queue queue;
         array_owner* retired = nullptr;
-        retire_resources(type, destination, completed, retired);
-        drain_arrays(retired);
+        retire_resources(type, destination, completed, retired, queue);
+        drain_arrays(retired, queue);
         throw;
     }
 }
 
 void destroy_payload(const value_type& type, std::byte* data) noexcept {
+    retirement_queue queue;
+    destroy_payload(type, data, queue);
+}
+void destroy_payload(const value_type& type, std::byte* data, retirement_queue& queue) noexcept {
     array_owner* pending = nullptr;
-    retire_resources(type, data, type_access::resources(type), pending);
-    drain_arrays(pending);
+    retire_resources(type, data, type_access::resources(type), pending, queue);
+    drain_arrays(pending, queue);
 }
 
 /// Borrows a source-order fixed-aggregate child.
@@ -273,6 +283,12 @@ std::size_t outer_count(const value_type& type) {
 
 const std::byte* value_access::data(const value& owner) noexcept {
     return owner._payload ? owner._payload->bytes.data() : nullptr;
+}
+void value_access::retire(value& owner, retirement_queue& queue) noexcept {
+    if (!owner._payload) return;
+    destroy_payload(owner._payload->type, owner._payload->bytes.data(), queue);
+    owner._payload->initialized = 0;
+    owner._payload.reset();
 }
 void value_access::release_to(value& owner, std::byte* destination) noexcept {
     if (!owner._payload) return;

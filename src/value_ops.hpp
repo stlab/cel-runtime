@@ -2,6 +2,7 @@
 #ifndef CEL_RUNTIME_VALUE_OPS_HPP
 #define CEL_RUNTIME_VALUE_OPS_HPP
 
+#include <cel/runtime/detail/retirement.hpp>
 #include <cel/runtime/value.hpp>
 
 namespace cel::detail {
@@ -52,10 +53,18 @@ void clone_payload(const value_type& type, const std::byte* source, std::byte* d
 /// Complexity: O(visited ownership paths and array nodes) time and O(1) auxiliary space.
 /// Scalar arrays need no per-element cleanup; nested arrays supply their own worklist links.
 void destroy_payload(const value_type& type, std::byte* data) noexcept;
+/// Retires a complete payload into an enclosing runtime executable retirement operation.
+/// Precondition: data contains exactly one valid owned representation of type.
+/// Complexity: O(visited ownership paths and array nodes); no allocation or throwing.
+void destroy_payload(const value_type& type, std::byte* data, retirement_queue& queue) noexcept;
 
 /// Bridges trusted owning wrappers to canonical raw representations.
 /// Does not permit byte-relocation of the public wrapper itself.
 struct value_access {
+    /// Retires one complete public owner's managed children into the enclosing operation.
+    /// Leaves owner as source unit; outer bytes and immutable descriptors retire normally.
+    /// Complexity: O(visited ownership paths and array nodes); no allocation or throwing.
+    static void retire(value& owner, retirement_queue& queue) noexcept;
     /// Transfers canonical ownership into a caller-provided uninitialized extent.
     /// Precondition: destination is aligned, disjoint, and large enough for owner.type().
     /// Leaves owner unit and does not destroy the transferred payload.

@@ -12,13 +12,16 @@ raw_segment& raw_segment::operator=(raw_segment&& other) noexcept {
     return *this;
 }
 void* raw_segment::allocate_capture(std::size_t size, std::size_t alignment) {
-    if (!_storage) _storage = std::make_unique<detail::instruction_storage>();
+    if (!_storage)
+        _storage =
+            detail::retirement_ptr<detail::instruction_storage>(new detail::instruction_storage());
     return _storage->arena.allocate(size, alignment);
 }
 void raw_segment::append(const void* capture,
                          void (*execute)(const void*, frame&),
-                         void (*destroy)(const void*) noexcept) {
-    _storage->instructions.push_back({capture, execute, destroy});
+                         void (*destroy)(const void*) noexcept,
+                         void (*retire)(const void*, detail::retirement_queue&) noexcept) {
+    _storage->instructions.push_back({capture, execute, destroy, retire});
 }
 void raw_segment::execute(frame& scope) const {
     scope.require_active();

@@ -19,6 +19,11 @@ callable parameter/result types. Equal byte layouts or `same_shape` alone do
 not authorize foreign ownership operations at an installed boundary.
 
 Public `value` copies have independent mutable aggregate payloads.
+Last-owner retirement also covers runtime-managed callable literals and lazy
+executable bodies. It allocates no traversal storage and consumes no
+nesting-dependent stack, including during unwinding. Shared child code stays
+live until its last handle releases it. Client capture destructors retain
+their own costs and behavior.
 `value::from` and `as` adapt recursively nested vectors and tuples;
 `at`, `field`, and concrete extraction return independent copies.
 `set` and `set_field` replace exact complete children without exposing mutable
@@ -153,7 +158,10 @@ builder/signature objects; borrowed callback references stay caller-owned.
 
 `to_value()` publishes an owning carrier. `callable::from_value(result)`
 receives that installed carrier through public interfaces and rejects foreign
-same-shape ownership ABIs. Results may be client leaves, nested aggregates, or
+same-shape ownership ABIs. Complete compatibility also checks every callable
+result's ownership, including callables inside aggregate results, before
+checked execution or preparation admits the input. Prepared execution does not
+repeat these comparisons. Results may be client leaves, nested aggregates, or
 another callable. The installed consumer exercises receipt after builders and
 the temporary compiled factory disappear.
 

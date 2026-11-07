@@ -118,6 +118,7 @@ public:
     /// Compares complete semantic shapes and compatible stored opaque ownership operations.
     /// Returns false for any shape, layout, identity, or stored-operation mismatch.
     /// Semantic comparison precedes ownership comparison; same_shape alone is insufficient.
+    /// Callable compatibility includes the ownership of every nested result component.
     /// Compatibility does not prove installed ownership or initialized borrowed canonical data.
     /// Comparison can allocate and propagates allocation failures.
     /// Complexity: O(distinct visited plan pairs, their edges, and name bytes) expected time

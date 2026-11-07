@@ -591,6 +591,47 @@ TEST_CASE("conversion and dynamic invocation reject foreign same shape ownership
     CHECK(foreign_clones == 1);
     CHECK_THROWS_AS(cel::callable::from_value(result), std::invalid_argument);
 }
+TEST_CASE("higher order results reject foreign ownership before checked execution and binding") {
+    for (bool nested : {false, true}) {
+        int effects = 0;
+        cel::dyn_segment inner_body;
+        inner_body.just(cel::value::from(7.0));
+        const auto canonical_inner = cel::callable(std::move(inner_body).finish(), {}).to_value();
+        const auto foreign_inner = cel::detail::type_access::install_callable_ownership(
+            canonical_inner.type(), {clone_foreign, destroy_foreign});
+        alignas(void*) const std::array<std::byte, sizeof(void*)> carrier{};
+        auto result = cel::detail::value_access::take(foreign_inner, carrier.data());
+        if (nested) {
+            std::array children{std::move(result)};
+            result = cel::value::tuple(children);
+        }
+        cel::dyn_segment foreign_body;
+        foreign_body.just(std::move(result));
+        const auto foreign_outer = cel::callable(std::move(foreign_body).finish(), {}).to_value();
+        const auto expected_result =
+            nested ? cel::value_type::tuple(std::array{canonical_inner.type()}) :
+                     canonical_inner.type();
+        const auto expected =
+            cel::bind_runtime_ownership(cel::value_type::callable({}, expected_result));
+        CHECK(foreign_outer.type().same_shape(expected));
+        CHECK_FALSE(foreign_outer.type().compatible_with(expected));
+        cel::dyn_segment reader;
+        reader.push_argument(0, expected);
+        reader.op0<void>([&effects] { ++effects; });
+        const auto program = std::move(reader).finish();
+        cel::raw_stack stack;
+        stack.push(true);
+        CHECK_THROWS_AS(program.execute(stack, std::array{foreign_outer}), std::invalid_argument);
+        CHECK(effects == 0);
+        CHECK(stack.depth() == 1);
+        CHECK(stack.pop<bool>());
+        CHECK_THROWS_AS(program.prepare_raw(std::array{foreign_outer.type()}, expected),
+                        std::invalid_argument);
+        CHECK_THROWS_AS(program.prepare_raw(std::array{expected}, foreign_outer.type()),
+                        std::invalid_argument);
+        CHECK(effects == 0);
+    }
+}
 TEST_CASE("closure construction validates reads parameters and independence") {
     cel::dyn_segment b;
     b.push_argument(1, cel::value_type::leaf<bool>());

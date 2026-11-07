@@ -437,12 +437,16 @@ public:
 /// Shares deliberately reference-semantic immutable code and frozen captures.
 /// Handles are move-only; factories retain the engine after this handle is destroyed.
 /// Captures are never copied as independent values; external referenced state stays caller-owned.
+/// Last ownership retires managed captures and nested executable bodies without allocation or
+/// nesting-dependent stack. Arbitrary client capture destructors retain their own costs.
 /// Example: `auto prepared = program.prepare<double, double>();`.
 class compiled_segment {
-    std::shared_ptr<const detail::frozen_program> _program;
+    detail::retirement_ptr<const detail::frozen_program> _program;
     friend class dyn_segment;
+    friend struct detail::segment_access;
     /// Retains a fully checked frozen engine.
-    explicit compiled_segment(std::shared_ptr<const detail::frozen_program> program) noexcept;
+    explicit compiled_segment(
+        detail::retirement_ptr<const detail::frozen_program> program) noexcept;
 
 public:
     /// Disallows misleading independent capture copies.
@@ -497,17 +501,18 @@ public:
 /// Referenced callback state remains caller-owned and supplies its own synchronization.
 /// Example: `bound.call_into(stack, borrowed_inputs, result_bytes);`.
 class prepared_raw_segment {
-    std::shared_ptr<const detail::frozen_program> _program;
+    detail::retirement_ptr<const detail::frozen_program> _program;
     std::vector<value_type> _arguments;
     value_type _result;
     std::vector<bool> _used;
     value_type _unit;
     friend class compiled_segment;
+    friend struct detail::segment_access;
     template <class R, class... Args>
     friend class prepared_segment;
     /// Retains a validated frozen signature.
     /// Complexity: O(argument count) time and binding space.
-    prepared_raw_segment(std::shared_ptr<const detail::frozen_program> program,
+    prepared_raw_segment(detail::retirement_ptr<const detail::frozen_program> program,
                          std::span<const value_type> arguments,
                          value_type result);
 

@@ -14,9 +14,11 @@ class callable_invocation;
 /// There is no implicit lexical environment or shared invocation argument/result table.
 /// Exclusive access is required; recursive entry into the same carrier throws logic_error.
 /// Distinct carriers can nest on the caller's stack. Callback references stay caller-owned.
+/// Last ownership retires runtime-managed executable graphs without allocation or recursive
+/// descent, including callable literals and lazy bodies. Client destructors retain their costs.
 /// Example: `callable fn(std::move(builder).finish(), parameters); auto v = fn.call(stack, args);`.
 class callable {
-    std::shared_ptr<detail::callable_state> _state;
+    detail::retirement_ptr<detail::callable_state> _state;
     friend struct detail::callable_access;
     friend class detail::callable_invocation;
 
