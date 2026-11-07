@@ -156,8 +156,10 @@ builder.op2<double, double, double>(
 auto program = std::move(builder).finish();
 
 cel::raw_stack stack;
-stack.reserve(1024, 256);
 auto bound = program.prepare<double, double>();
+const auto needed = bound.requirements().for_prefix(stack.cursor(), stack.depth());
+stack.reserve(needed.bytes.size, needed.bytes.alignment);
+stack.reserve_depth(needed.slots);
 const double result = bound.call(stack, 8.0); // 5.0
 ```
 
@@ -166,7 +168,14 @@ const double result = bound.call(stack, 8.0); // 5.0
 Ordinary callbacks receive only their older-first operands, as const
 callbacks; the raw interface separately supplies frame-aware operations.
 Named callback parameters match the declared operands after cv/reference
-removal. Callbacks return the declared result or a reference to it, with
+removal, including `const &` and `const & noexcept` call operators.
+Generic callbacks expose a specialization whose parameter identities exactly
+match the declared operands. Ambiguous or uninspectable overload sets require
+`with_signature<Return(Parameters...)>(callback)`, which selects an actual exact
+const member rather than accepting a converting invocation. Include actual
+parameter and return reference qualifiers in that signature. Exact function
+pointers can instead be supplied directly with an explicit cast.
+Callbacks return the declared result or a reference to it, with
 independent result ownership. No implicit operand/result type conversions
 authorize another CEL signature. Callback exceptions replace Result-shaped
 operation error transport.
@@ -187,6 +196,23 @@ allocate independent owning representations. Root signatures admit valid
 client leaves, including over-aligned leaves; callable-parameter restrictions
 do not apply to ordinary root programs.
 
+`requirements()` on compiled, typed-prepared, and raw-prepared handles borrows
+the same frozen canonical frame requirements: maximum intermediate `alignment`,
+peak zero-origin `frame_extent`, and peak `live_slots`. These include
+intermediates hidden by the final result and zero-byte operands that still need
+slot metadata. They are simultaneous peaks, not cumulative allocation totals.
+
+Before entering a frame, call
+`requirements().for_prefix(stack.cursor(), stack.depth())` without intervening
+stack mutation. The returned `bytes` layout and `slots` count include the
+caller prefix. The helper rounds the current cursor up to the program's maximum
+alignment before adding its extent, conservatively covering alignment padding,
+and checks both extent and depth sums for overflow. Pass these totals to
+`reserve` and `reserve_depth`; reservation retains any higher existing alignment.
+Construction checks intermediate layout arithmetic before publishing opcodes.
+Composite payload allocations, concrete callback temporaries, result buffers,
+and arbitrary callback or nested external stack work are not statically inferred.
+
 All program and prepared handles are move-only. Prepared factories share a
 deliberately reference-semantic frozen engine, retaining captures and metadata
 after the builder or compiled handle disappears. This sharing does not promise
@@ -206,6 +232,9 @@ auto difference = std::move(builder).op2<double>(
 auto program = std::move(difference).finish();
 auto bound = program.prepare<double, double, double>();
 cel::raw_stack stack;
+const auto needed = bound.requirements().for_prefix(stack.cursor(), stack.depth());
+stack.reserve(needed.bytes.size, needed.bytes.alignment);
+stack.reserve_depth(needed.slots);
 const double result = bound.call(stack, 10.0, 2.0); // 8.0
 ```
 

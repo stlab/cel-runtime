@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSL-1.0
 #include "frame.hpp"
 #include "instruction.hpp"
+#include "storage.hpp"
 #include "type_ops.hpp"
 #include "value_ops.hpp"
 #include <algorithm>
@@ -15,9 +16,14 @@ struct frozen_program {
     raw_segment body;                 ///< Owns stable captures and const dispatch records.
     std::vector<argument_read> reads; ///< Retains each declared positional clone requirement.
     value_type result;                ///< Retains the single final owner plan.
+    stack_requirements requirements;  ///< Retains statically known canonical frame peaks.
     /// Freezes successfully constructed code and metadata by normal ownership transfer.
-    frozen_program(raw_segment input, std::vector<argument_read> arguments, value_type output) :
-        body(std::move(input)), reads(std::move(arguments)), result(std::move(output)) {}
+    frozen_program(raw_segment input,
+                   std::vector<argument_read> arguments,
+                   value_type output,
+                   stack_requirements required) :
+        body(std::move(input)), reads(std::move(arguments)), result(std::move(output)),
+        requirements(required) {}
 };
 const std::byte* canonical_data(const value& source) noexcept { return value_access::data(source); }
 result_storage::result_storage(const prepared_raw_segment& binding) :
@@ -34,8 +40,13 @@ result_storage::~result_storage() {
 }
 } // namespace cel::detail
 namespace cel {
-void dyn_segment::check_operation(std::span<const value_type> inputs,
-                                  std::span<const value_type> outputs) {
+stack_reservation stack_requirements::for_prefix(std::size_t cursor, std::size_t depth) const {
+    return {{detail::checked_add(align_offset(cursor, alignment), frame_extent), alignment},
+            detail::checked_add(depth, live_slots)};
+}
+detail::construction_effect dyn_segment::check_operation(std::span<const value_type> inputs,
+                                                         std::span<const value_type> outputs) {
+    assert(outputs.size() <= 1);
     if (inputs.size() > _stack.size()) throw std::invalid_argument("operation operand underflow");
     // Compare the source-order suffix before emitting any effects.
     for (std::size_t i = 0; i != inputs.size(); ++i) {
@@ -43,25 +54,50 @@ void dyn_segment::check_operation(std::span<const value_type> inputs,
         detail::require_compatible(inputs[i], _stack[_stack.size() - inputs.size() + i]);
     }
     std::ranges::for_each(outputs, detail::require_ownership);
-    _stack.reserve(_stack.size() - inputs.size() + outputs.size());
+    const auto remaining = _stack.size() - inputs.size();
+    const auto depth = detail::checked_add(remaining, outputs.size());
+    detail::construction_effect effect{remaining == 0 ? 0 : _end_cursors[remaining - 1],
+                                       _requirements};
+    // Account for the canonical result only after the consumed suffix has retired.
+    for (const auto& output : outputs) {
+        const auto bytes = output.byte_layout();
+        effect.cursor =
+            detail::checked_add(align_offset(effect.cursor, bytes.alignment), bytes.size);
+        effect.requirements.alignment = std::max(effect.requirements.alignment, bytes.alignment);
+    }
+    effect.requirements.frame_extent = std::max(effect.requirements.frame_extent, effect.cursor);
+    effect.requirements.live_slots = std::max(effect.requirements.live_slots, depth);
+    _stack.reserve(depth);
+    _end_cursors.reserve(depth);
+    return effect;
 }
 // NOLINTNEXTLINE(bugprone-exception-escape): pre-reserved, nonthrowing copies.
 void dyn_segment::apply_operation(std::size_t consumed,
-                                  std::span<const value_type> outputs) noexcept {
+                                  std::span<const value_type> outputs,
+                                  const detail::construction_effect& effect) noexcept {
     assert(consumed <= _stack.size());
+    assert(outputs.size() <= 1);
+    assert(_stack.size() == _end_cursors.size());
     assert(_stack.capacity() >= _stack.size() - consumed + outputs.size());
+    assert(_end_cursors.capacity() >= _stack.size() - consumed + outputs.size());
     // Remove consumed witnesses and publish only pre-reserved output metadata.
-    for (std::size_t i = 0; i != consumed; ++i)
+    for (std::size_t i = 0; i != consumed; ++i) {
         _stack.pop_back();
-    for (const auto& output : outputs)
+        _end_cursors.pop_back();
+    }
+    for (const auto& output : outputs) {
         _stack.push_back(output);
+        _end_cursors.push_back(effect.cursor);
+    }
+    _requirements = effect.requirements;
 }
 void dyn_segment::push_argument(std::size_t index, value_type type) {
     detail::require_ownership(type);
     const auto existing = std::ranges::find(_reads, index, &detail::argument_read::index);
     if (existing != _reads.end()) detail::require_compatible(existing->type, type);
     const bool added = existing == _reads.end();
-    _stack.reserve(_stack.size() + 1);
+    const std::array outputs{type};
+    const auto effect = check_operation({}, outputs);
     if (added) _reads.reserve(_reads.size() + 1);
     detail::segment_access::append(_body, [index, type](frame& scope) {
         const auto input = scope.argument(index);
@@ -72,22 +108,24 @@ void dyn_segment::push_argument(std::size_t index, value_type type) {
             });
     });
     if (added) _reads.push_back({index, type});
-    _stack.push_back(std::move(type));
+    apply_operation(0, outputs, effect);
 }
 void dyn_segment::just(value literal) {
     const auto type = literal.type();
-    detail::require_ownership(type);
-    _stack.reserve(_stack.size() + 1);
+    const std::array outputs{type};
+    const auto effect = check_operation({}, outputs);
     detail::segment_access::append(
         _body, [literal = std::move(literal)](frame& scope) { scope.push_clone(literal); });
-    _stack.push_back(type);
+    apply_operation(0, outputs, effect);
 }
 compiled_segment dyn_segment::finish() && {
     if (_stack.size() > 1) throw std::invalid_argument("final stack has more than one result");
     if (_stack.empty()) just(value{});
-    auto program = std::make_shared<const detail::frozen_program>(std::move(_body),
-                                                                  std::move(_reads), _stack.back());
+    auto program = std::make_shared<const detail::frozen_program>(
+        std::move(_body), std::move(_reads), _stack.back(), _requirements);
     _stack.clear();
+    _end_cursors.clear();
+    _requirements = {};
     return compiled_segment(std::move(program));
 }
 compiled_segment::compiled_segment(std::shared_ptr<const detail::frozen_program> program) noexcept :
@@ -95,6 +133,10 @@ compiled_segment::compiled_segment(std::shared_ptr<const detail::frozen_program>
 const value_type& compiled_segment::result_type() const noexcept {
     assert(_program);
     return _program->result;
+}
+const stack_requirements& compiled_segment::requirements() const noexcept {
+    assert(_program);
+    return _program->requirements;
 }
 std::span<const detail::argument_read> compiled_segment::argument_reads() const noexcept {
     assert(_program);
@@ -132,6 +174,10 @@ prepared_raw_segment::prepared_raw_segment(std::shared_ptr<const detail::frozen_
     // Freeze which input positions need materialization in typed convenience calls.
     for (const auto& read : _program->reads)
         _used[read.index] = true;
+}
+const stack_requirements& prepared_raw_segment::requirements() const noexcept {
+    assert(_program);
+    return _program->requirements;
 }
 void prepared_raw_segment::call_into(raw_stack& stack,
                                      std::span<const borrowed_value> arguments,

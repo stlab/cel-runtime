@@ -7,6 +7,10 @@
 
 namespace cel::detail {
 
+/// Returns a checked byte extent or count sum.
+/// Throws std::overflow_error when the sum cannot fit in std::size_t.
+std::size_t checked_add(std::size_t left, std::size_t right);
+
 /// Releases an aligned allocation using the alignment supplied to operator new.
 /// Invariant: alignment is a nonzero power of two matching the owned allocation.
 struct aligned_delete {

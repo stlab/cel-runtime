@@ -18,21 +18,24 @@ void validate_alignment(std::size_t alignment) {
         throw std::invalid_argument("alignment must be a nonzero power of two");
 }
 
-/// Returns the sum, throwing std::overflow_error when it cannot fit in std::size_t.
+} // namespace
+
+namespace cel::detail {
+
 std::size_t checked_add(std::size_t left, std::size_t right) {
     if (right > std::numeric_limits<std::size_t>::max() - left)
         throw std::overflow_error("byte extent overflow");
     return left + right;
 }
 
-} // namespace
+} // namespace cel::detail
 
 namespace cel {
 
 std::size_t align_offset(std::size_t offset, std::size_t alignment) {
     validate_alignment(alignment);
     const auto remainder = offset % alignment;
-    return remainder == 0 ? offset : checked_add(offset, alignment - remainder);
+    return remainder == 0 ? offset : detail::checked_add(offset, alignment - remainder);
 }
 
 } // namespace cel

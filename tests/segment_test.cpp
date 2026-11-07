@@ -369,7 +369,9 @@ TEST_CASE("reserved typed and runtime-bound scalar hot loops do not allocate") {
     const std::array types{cel::value_type::leaf<double>()};
     auto raw = program.prepare_raw(types, types[0]);
     cel::raw_stack stack;
-    stack.reserve(4096, 256);
+    const auto reservation = typed.requirements().for_prefix(stack.cursor(), stack.depth());
+    stack.reserve(reservation.bytes.size, reservation.bytes.alignment);
+    stack.reserve_depth(reservation.slots);
     CHECK(typed.call(stack, 5.0) == 2.0);
     double input = 8.0;
     const std::array views{
@@ -622,4 +624,238 @@ TEST_CASE("typed composite result construction and extraction failures retain pr
     CHECK(stack.cursor() == prefix);
     CHECK(bound.call(stack) == std::vector<double>{3.0});
     CHECK(stack.pop<std::vector<double>>() == std::vector<double>{7.0});
+}
+
+/// Supplies named overloads that require an exact explicit signature selection.
+struct overloaded_callback {
+    /// Doubles one exact operand.
+    double operator()(double number) const { return number * 2.0; }
+    /// Adds two exact operands.
+    double operator()(double a, double b) const { return a + b; }
+};
+
+/// Exercises invocation through the required const lvalue callback boundary.
+struct lvalue_callback {
+    /// Increments its exact operand through a const lvalue.
+    double operator()(double number) const& { return number + 1.0; }
+};
+
+/// Exercises nonthrowing invocation through the same const lvalue boundary.
+struct lvalue_noexcept_callback {
+    /// Increments its exact operand without throwing.
+    double operator()(double number) const& noexcept { return number + 2.0; }
+};
+
+/// Supplies an introspection-ineligible invocation through an exact function-pointer conversion.
+struct pointer_callback {
+    using function = double (*)(double); ///< Describes its explicit concrete invocation.
+
+    /// Doubles one exact operand.
+    static double twice(double number) { return number * 2.0; }
+    /// Returns its exact function pointer.
+    operator function() const noexcept { return twice; }
+};
+
+/// Detects exact explicit member selection without hard introspection errors.
+template <class Signature, class F>
+concept signature_selectable = requires(F callback) {
+    cel::with_signature<Signature>(std::move(callback));
+};
+
+/// Retains a fixed concrete operand even though its callback is a function template.
+struct defaulted_generic {
+    /// Returns its exact double operand independently of its defaulted template parameter.
+    template <class T = void>
+    double operator()(double number) const {
+        return number;
+    }
+};
+
+/// Defaults a non-deduced template operand to double under ordinary invocation.
+struct nondeduced_generic {
+    /// Returns the exact ordinarily selected operand.
+    template <class T = double>
+    double operator()(std::type_identity_t<T> number) const {
+        return number;
+    }
+};
+
+TEST_CASE("exact callback selection rejects ambiguous conversions and accepts const lvalues") {
+    static_assert(!signature_selectable<double(bool), overloaded_callback>);
+    static_assert(!cel::detail::exact_callback<pointer_callback, double, double>());
+    static_assert(!signature_selectable<double(double), pointer_callback>);
+    cel::dyn_segment builder;
+    builder.just(cel::value::from(3.0));
+    builder.op1<double, double>(cel::with_signature<double(double)>(overloaded_callback{}));
+    builder.op1<double, double>(lvalue_callback{});
+    builder.op1<double, double>(lvalue_noexcept_callback{});
+    cel::raw_stack stack;
+    CHECK(std::move(builder).finish().prepare<double>().call(stack) == 9.0);
+    cel::dyn_segment binary;
+    binary.just(cel::value::from(2.0));
+    binary.just(cel::value::from(5.0));
+    binary.op2<double, double, double>(
+        cel::with_signature<double(double, double)>(overloaded_callback{}));
+    CHECK(std::move(binary).finish().prepare<double>().call(stack) == 7.0);
+    cel::dyn_segment pointer;
+    pointer.just(cel::value::from(4.0));
+    pointer.op1<double, double>(static_cast<pointer_callback::function>(pointer_callback{}));
+    CHECK(std::move(pointer).finish().prepare<double>().call(stack) == 8.0);
+    cel::dyn_segment qualified;
+    qualified.just(cel::value::from(3.0));
+    qualified.op1<double, double>(cel::with_signature<double(double)>(lvalue_noexcept_callback{}));
+    CHECK(std::move(qualified).finish().prepare<double>().call(stack) == 5.0);
+}
+
+TEST_CASE("provably exact generic callbacks retain source operand identities") {
+    cel::dyn_segment builder;
+    builder.just(cel::value::from(true));
+    builder.op1<bool, bool>([](auto flag) { return !flag; });
+    builder.op1<bool, bool>([]<class T>(const T& flag) noexcept { return !flag; });
+    cel::raw_stack stack;
+    CHECK(std::move(builder).finish().prepare<bool>().call(stack));
+    cel::dyn_segment forwarded;
+    forwarded.just(cel::value::from(2.0));
+    forwarded.just(cel::value::from(3.0));
+    forwarded.op2<double, double, double>([](auto&&... numbers) { return (numbers + ...); });
+    forwarded.op1<double, double>(defaulted_generic{});
+    forwarded.op1<double, double>(nondeduced_generic{});
+    CHECK(std::move(forwarded).finish().prepare<double>().call(stack) == 5.0);
+    cel::dyn_segment mixed;
+    mixed.just(cel::value::from(6.0));
+    mixed.just(cel::value::from(true));
+    mixed.op2<double, bool, double>(cel::with_signature<double(double, bool)>(
+        [](double number, auto flag) { return flag ? number : 0.0; }));
+    CHECK(std::move(mixed).finish().prepare<double>().call(stack) == 6.0);
+    cel::dyn_segment pointer;
+    pointer.push_argument(0, cel::value_type::leaf<const client_leaf*>());
+    pointer.op1<const client_leaf*, int>([](const auto* source) { return source->number; });
+    const client_leaf source{41};
+    CHECK(std::move(pointer).finish().prepare<int, const client_leaf*>().call(stack, &source) ==
+          41);
+}
+
+/// Provides a temporary extent larger than its final scalar result.
+struct large_temporary {
+    std::array<std::byte, 1024> data{}; ///< Owns a trivially copyable client payload.
+};
+
+TEST_CASE("published reservations cover hidden intermediate alignment and caller padding") {
+    cel::dyn_segment builder;
+    builder.op0<double>([] { return 2.0; });
+    builder.op0<client_leaf>([] { return client_leaf{7}; });
+    builder.op1<client_leaf, double>([](client_leaf source) { return double(source.number); });
+    builder.op2<double, double, double>([](double a, double b) { return a + b; });
+    auto program = std::move(builder).finish();
+    CHECK(program.result_type().byte_layout().alignment == alignof(double));
+    const auto& requirements = program.requirements();
+    CHECK(requirements.alignment == alignof(client_leaf));
+    CHECK(requirements.frame_extent == 512);
+    CHECK(requirements.live_slots == 2);
+    auto typed = program.prepare<double>();
+    auto raw = program.prepare_raw({}, program.result_type());
+    CHECK(&typed.requirements() == &program.requirements());
+    CHECK(&raw.requirements() == &program.requirements());
+    cel::raw_stack stack;
+    stack.push(true);
+    const auto prefix_cursor = stack.cursor();
+    const auto prefix_depth = stack.depth();
+    const auto reservation = typed.requirements().for_prefix(prefix_cursor, prefix_depth);
+    CHECK(reservation.bytes.size == 768);
+    CHECK(reservation.slots == 3);
+    stack.reserve(reservation.bytes.size, reservation.bytes.alignment);
+    stack.reserve_depth(reservation.slots);
+    double result = 0.0;
+    std::size_t count = 0;
+    alignas(double) std::array<std::byte, sizeof(double)> bytes{};
+    {
+        allocation_measurement measurement;
+        result = typed.call(stack);
+        raw.call_into(stack, {}, bytes.data());
+        raw.destroy_result(bytes.data());
+        count = allocations;
+    }
+    CHECK(result == 9.0);
+    CHECK(count == 0);
+    CHECK(stack.cursor() == prefix_cursor);
+    CHECK(stack.depth() == prefix_depth);
+    CHECK(stack.pop<bool>());
+}
+
+TEST_CASE("published reservation covers larger temporary canonical extents") {
+    cel::dyn_segment builder;
+    builder.op0<large_temporary>([] { return large_temporary{}; });
+    builder.op1<large_temporary, bool>(
+        [](large_temporary source) { return source.data[0] == std::byte{}; });
+    auto bound = std::move(builder).finish().prepare<bool>();
+    CHECK(bound.requirements().frame_extent == sizeof(large_temporary));
+    CHECK(bound.requirements().live_slots == 1);
+    cel::raw_stack stack;
+    const auto reservation = bound.requirements().for_prefix(stack.cursor(), stack.depth());
+    stack.reserve(reservation.bytes.size, reservation.bytes.alignment);
+    stack.reserve_depth(reservation.slots);
+    bool result = false;
+    std::size_t count = 0;
+    {
+        allocation_measurement measurement;
+        result = bound.call(stack);
+        count = allocations;
+    }
+    CHECK(result);
+    CHECK(count == 0);
+}
+
+TEST_CASE("published zero-byte peak reserves live slots independently of byte extent") {
+    using unit = std::tuple<>;
+    cel::dyn_segment builder;
+    for (int i = 0; i != 12; ++i)
+        builder.op0<unit>([] { return unit{}; });
+    builder.op<void, unit, unit, unit, unit, unit, unit, unit, unit, unit, unit, unit, unit>(
+        [](auto...) {});
+    auto bound = std::move(builder).finish().prepare<unit>();
+    CHECK(bound.requirements().frame_extent == 0);
+    CHECK(bound.requirements().live_slots == 12);
+    cel::raw_stack stack;
+    stack.push(unit{});
+    stack.push(unit{});
+    const auto reservation = bound.requirements().for_prefix(stack.cursor(), stack.depth());
+    CHECK(reservation.bytes.size == 0);
+    CHECK(reservation.slots == 14);
+    stack.reserve(reservation.bytes.size, reservation.bytes.alignment);
+    stack.reserve_depth(reservation.slots);
+    std::size_t count = 0;
+    {
+        allocation_measurement measurement;
+        (void)bound.call(stack);
+        count = allocations;
+    }
+    CHECK(count == 0);
+    CHECK(stack.depth() == 2);
+    CHECK(stack.cursor() == 0);
+    CHECK(stack.pop<unit>() == unit{});
+    CHECK(stack.pop<unit>() == unit{});
+}
+
+TEST_CASE("published reservations check prefix arithmetic and reject construction overflow") {
+    cel::dyn_segment builder;
+    builder.op0<double>([] { return 2.0; });
+    auto program = std::move(builder).finish();
+    const auto maximum = std::numeric_limits<std::size_t>::max();
+    CHECK_THROWS_AS(program.requirements().for_prefix(maximum, 0), std::overflow_error);
+    CHECK_THROWS_AS(program.requirements().for_prefix(0, maximum), std::overflow_error);
+    auto malformed = program.requirements();
+    malformed.alignment = 3;
+    CHECK_THROWS_AS(malformed.for_prefix(0, 0), std::invalid_argument);
+    auto huge = cel::value_type::leaf<bool>();
+    for (int i = 0; i != std::numeric_limits<std::size_t>::digits - 1; ++i) {
+        const std::array fields{huge, huge};
+        huge = cel::value_type::tuple(fields);
+    }
+    cel::dyn_segment wide;
+    wide.push_argument(0, huge);
+    CHECK_THROWS_AS(wide.push_argument(1, huge), std::overflow_error);
+    auto frozen = std::move(wide).finish();
+    CHECK(frozen.argument_reads().size() == 1);
+    CHECK(frozen.requirements().frame_extent == huge.byte_layout().size);
+    CHECK(frozen.requirements().live_slots == 1);
 }

@@ -11,6 +11,35 @@ class compiled_segment;
 class prepared_raw_segment;
 template <class R, class... Args>
 class prepared_segment;
+
+/// Describes total caller storage and slot capacity for one prefixed execution.
+/// Example: `stack.reserve(r.bytes.size, r.bytes.alignment); stack.reserve_depth(r.slots);`.
+struct stack_reservation {
+    layout bytes;      ///< Gives total byte capacity and required alignment.
+    std::size_t slots; ///< Gives total live-slot capacity, including the caller prefix.
+};
+
+/// Describes statically known canonical frame storage for a frozen ordinary program.
+/// Extent and slots are peak simultaneous requirements, not cumulative instruction costs.
+/// Composite payload allocations, concrete callback temporaries, and arbitrary callback or
+/// nested external stack work are not inferred. Result destinations remain caller-owned.
+/// Example: `auto r = program.requirements().for_prefix(stack.cursor(), stack.depth());`.
+struct stack_requirements {
+    std::size_t alignment = 1;    ///< Gives maximum intermediate canonical alignment.
+    std::size_t frame_extent = 0; ///< Gives peak canonical extent for a zero-cursor frame.
+    std::size_t live_slots = 0;   ///< Gives peak simultaneously live frame operands.
+
+    /// Returns checked conservative total capacities for an existing caller prefix.
+    /// Rounds cursor up to alignment, then adds frame_extent; adds depth to live_slots.
+    /// Existing storage alignment is retained by raw_stack::reserve, never narrowed.
+    /// Throws invalid_argument for invalid alignment and overflow_error for either sum.
+    /// Reserve before entering a frame, using cursor/depth measured without intervening mutation.
+    /// No allocation or signature traversal occurs.
+    /// Example: `auto r = requirements.for_prefix(stack.cursor(), stack.depth());
+    /// stack.reserve(r.bytes.size, r.bytes.alignment); stack.reserve_depth(r.slots);`.
+    stack_reservation for_prefix(std::size_t cursor, std::size_t depth) const;
+};
+
 namespace detail {
 struct frozen_program;
 /// Selects native leaf boundaries rather than unspecified standard composite layouts.
@@ -24,7 +53,7 @@ template <class... T>
 inline constexpr bool native_leaf<std::tuple<T...>> = false;
 /// Describes a uniquely declared callback signature without accepting operand conversions.
 template <class T>
-struct callback_signature;
+struct callback_signature {};
 /// Describes ordinary function pointers.
 template <class R, class... A>
 struct callback_signature<R (*)(A...)> {
@@ -39,7 +68,35 @@ struct callback_signature<R (C::*)(A...) const> : callback_signature<R (*)(A...)
 /// Describes nonthrowing const callback members.
 template <class C, class R, class... A>
 struct callback_signature<R (C::*)(A...) const noexcept> : callback_signature<R (*)(A...)> {};
-/// Rejects declared operand/result conversions while admitting generic const callbacks.
+/// Describes callbacks callable through a const lvalue.
+template <class C, class R, class... A>
+struct callback_signature<R (C::*)(A...) const&> : callback_signature<R (*)(A...)> {};
+/// Describes nonthrowing callbacks callable through a const lvalue.
+template <class C, class R, class... A>
+struct callback_signature<R (C::*)(A...) const & noexcept> : callback_signature<R (*)(A...)> {};
+/// Selects a member template by an exact invocation signature, not explicit type arguments.
+/// Uniform value, const-reference, and forwarding-reference parameters are supported;
+/// other parameter patterns use with_signature's explicit exact selection.
+template <class F, class R, class... A>
+consteval auto generic_member() {
+    if constexpr (requires { static_cast<R (F::*)(A...) const>(&F::template operator()); })
+        return static_cast<R (F::*)(A...) const>(&F::template operator());
+    else if constexpr (requires { static_cast<R (F::*)(A...) const&>(&F::template operator()); })
+        return static_cast<R (F::*)(A...) const&>(&F::template operator());
+    else if constexpr (requires {
+                           static_cast<R (F::*)(const A&...) const>(&F::template operator());
+                       })
+        return static_cast<R (F::*)(const A&...) const>(&F::template operator());
+    else if constexpr (requires {
+                           static_cast<R (F::*)(const A&...) const&>(&F::template operator());
+                       })
+        return static_cast<R (F::*)(const A&...) const&>(&F::template operator());
+    else if constexpr (requires { static_cast<R (F::*)(A&&...) const>(&F::template operator()); })
+        return static_cast<R (F::*)(A&&...) const>(&F::template operator());
+    else if constexpr (requires { static_cast<R (F::*)(A&&...) const&>(&F::template operator()); })
+        return static_cast<R (F::*)(A&&...) const&>(&F::template operator());
+}
+/// Rejects conversions using declared signatures and deduction-proven generic signatures.
 template <class F, class R, class... A>
 consteval bool exact_callback() {
     if constexpr (!std::is_invocable_v<const F&, A...>)
@@ -50,20 +107,82 @@ consteval bool exact_callback() {
         if constexpr (requires { typename callback_signature<F>::arguments; })
             return result_matches &&
                    std::same_as<typename callback_signature<F>::arguments, std::tuple<A...>>;
-        else if constexpr (requires { &F::operator(); })
+        else if constexpr (requires {
+                               typename callback_signature<decltype(&F::operator())>::arguments;
+                           })
             return result_matches &&
                    std::same_as<typename callback_signature<decltype(&F::operator())>::arguments,
                                 std::tuple<A...>>;
-        else
-            return result_matches;
+        else {
+            using member =
+                decltype(generic_member<F, std::invoke_result_t<const F&, A...>, A...>());
+            if constexpr (std::is_void_v<member>)
+                return false;
+            else
+                return result_matches && std::is_invocable_v<member, const F&, A...>;
+        }
     }
 }
+/// Describes whether an explicit exact member signature can be selected.
+template <class Signature, class F>
+struct signature_binding {
+    static constexpr bool available = false; ///< Rejects unsupported signature descriptions.
+};
+/// Selects an exact const callback member, never an implicitly converting invocation.
+template <class R, class... A, class F>
+struct signature_binding<R(A...), F> {
+    /// Returns the exact selected member pointer, or void when selection is unavailable.
+    static consteval auto select() {
+        if constexpr (requires { static_cast<R (F::*)(A...) const>(&F::operator()); })
+            return static_cast<R (F::*)(A...) const>(&F::operator());
+        else if constexpr (requires { static_cast<R (F::*)(A...) const&>(&F::operator()); })
+            return static_cast<R (F::*)(A...) const&>(&F::operator());
+    }
+    static constexpr bool available = !std::is_void_v<decltype(select())>;
+    ///< Reports successful exact member selection.
+};
+/// Owns a callback with a uniquely selected exact public invocation signature.
+template <class Signature, class F>
+class signature_callback;
+/// Invokes the selected member directly rather than redispatching an ambiguous overload set.
+template <class R, class... A, class F>
+class signature_callback<R(A...), F> {
+    F _callback;
+
+public:
+    /// Transfers the normally constructed callback object.
+    /// Complexity: O(callback construction).
+    explicit signature_callback(F callback) : _callback(std::move(callback)) {}
+    /// Invokes exactly the previously selected const member.
+    /// Complexity: O(callback work).
+    R operator()(A... arguments) const {
+        return std::invoke(signature_binding<R(A...), F>::select(), _callback,
+                           std::forward<A>(arguments)...);
+    }
+};
 /// Retains one emitted positional read and its complete frozen clone witness.
 struct argument_read {
     std::size_t index; ///< Gives the caller's source-order position.
     value_type type;   ///< Retains complete shape and ownership.
 };
+/// Stages checked canonical accounting until the corresponding opcode is published.
+struct construction_effect {
+    std::size_t cursor;              ///< Gives the resulting zero-origin frame cursor.
+    stack_requirements requirements; ///< Gives the staged peak requirements.
+};
 } // namespace detail
+
+/// Selects an exact const callback member from an ambiguous or uninspectable overload set.
+/// Signature includes actual parameter and return reference qualifiers; no conversion
+/// creates a signature that the callback does not declare. The wrapper owns F normally.
+/// Generic callbacks that cannot prove their instantiated parameter identities use this
+/// explicit selection. Function pointers can instead be supplied directly with an exact cast.
+/// Complexity: O(callback construction) time and capture space.
+/// Example: `builder.op1<double, double>(with_signature<double(double)>(overloaded{}));`.
+template <class Signature, class F>
+requires(detail::signature_binding<Signature, F>::available) auto with_signature(F callback) {
+    return detail::signature_callback<Signature, F>(std::move(callback));
+}
 
 /// Checks stack effects while constructing a move-only ordinary operation sequence.
 /// Operations consume older-first exact operands; exceptions replace Result-shaped transport.
@@ -73,14 +192,21 @@ class dyn_segment {
     raw_segment _body;
     std::vector<value_type> _stack;
     std::vector<detail::argument_read> _reads;
+    std::vector<std::size_t> _end_cursors; ///< Mirrors canonical cursor ends in _stack order.
+    stack_requirements _requirements;      ///< Retains committed intermediate storage peaks.
     /// Validates the ordered suffix and reserves metadata before opcode publication.
     /// Throws invalid_argument for underflow, incompatible operands, or absent ownership.
-    /// Complexity: O(arity + distinct compared metadata pairs) time and auxiliary space.
-    void check_operation(std::span<const value_type> inputs, std::span<const value_type> outputs);
+    /// Complexity: O(arity + distinct compared metadata pairs) time and auxiliary space,
+    /// plus O(current stack depth) metadata transfer on capacity growth.
+    detail::construction_effect check_operation(std::span<const value_type> inputs,
+                                                std::span<const value_type> outputs);
     /// Publishes a previously validated logical stack effect without allocation.
-    /// Precondition: check_operation succeeded and body publication succeeded.
+    /// Precondition: check_operation supplied effect and body publication succeeded;
+    /// outputs contains at most one result.
     /// Complexity: O(consumed operand count).
-    void apply_operation(std::size_t consumed, std::span<const value_type> outputs) noexcept;
+    void apply_operation(std::size_t consumed,
+                         std::span<const value_type> outputs,
+                         const detail::construction_effect& effect) noexcept;
 
 public:
     /// Creates an empty checked stack.
@@ -98,21 +224,27 @@ public:
     /// Emits an owned clone of a borrowed positional input.
     /// Repeated declarations must have identical complete shapes and ownership plans.
     /// Throws invalid_argument for incompatible repeated declarations or missing clone capability.
-    /// Complexity: O(emitted read count + compared metadata) construction time and stored space.
+    /// Complexity: O(emitted read count + compared metadata) construction time,
+    /// plus O(current stack depth) metadata transfer on capacity growth.
     /// Example: `builder.push_argument(0, value_type::leaf<double>());`.
     void push_argument(std::size_t index, value_type type);
     /// Retains a literal owner and emits an independent clone on every execution.
     /// Throws invalid_argument if the complete value cannot be cloned.
-    /// Complexity: O(metadata admission) time and one retained owner.
+    /// Complexity: O(metadata admission) time, plus O(current stack depth) metadata transfer
+    /// on capacity growth; retains one owner.
     /// Example: `builder.just(value::from(true));`.
     void just(value literal);
     /// Emits an arbitrary-arity const callback with exact declared operands and result.
     /// R is a trusted concrete adapter type or void; void consumes without producing a value.
     /// Named callback parameters must match Args after cv/reference removal.
-    /// Generic callbacks must accept Args and return R or a reference to R.
+    /// Generic callbacks must expose a specialization with provably exact Args that
+    /// deduction from its complete function-pointer signature also selects.
+    /// Ambiguous/uninspectable callbacks require with_signature's exact member selection.
+    /// Callbacks return R or a reference to R; no implicit result conversion is admitted.
     /// Callbacks may reference caller-owned state; freezing does not make it thread-safe.
     /// Throws invalid_argument for current stack mismatch before publishing an opcode.
-    /// Complexity: O(arity + compared metadata + capture construction) time and stored space.
+    /// Complexity: O(arity + compared metadata + capture construction) time,
+    /// plus O(current stack depth) metadata transfer on capacity growth.
     /// Example: `builder.op<double, double>([](double n) { return n * 2.0; });`.
     template <class R, class... Args, class F>
     requires(detail::exact_callback<F, R, Args...>()) void op(F callback) {
@@ -125,15 +257,15 @@ public:
             else
                 return std::array{detail::concrete_adapter<R>::type()};
         }();
-        check_operation(inputs, outputs);
+        const auto effect = check_operation(inputs, outputs);
         _body.template push_op<R, Args...>(
             [callback = std::move(callback)](frame&, Args... operands) -> R {
                 return std::invoke(callback, std::move(operands)...);
             });
-        apply_operation(sizeof...(Args), outputs);
+        apply_operation(sizeof...(Args), outputs, effect);
     }
     /// Pushes a zero-operand result; follows op's validation and exception contract.
-    /// Complexity: O(capture construction).
+    /// Complexity: O(capture construction), plus O(current stack depth) on metadata growth.
     /// Example: `builder.op0<double>([] { return 2.0; });`.
     template <class R, class F>
     requires(detail::exact_callback<F, R>()) void op0(F callback) {
@@ -192,6 +324,11 @@ public:
     /// Precondition: this handle has not been moved from.
     /// Example: `auto type = program.result_type();`.
     const value_type& result_type() const noexcept;
+    /// Borrows frozen intermediate alignment, peak canonical extent, and live-slot depth.
+    /// Precondition: this handle has not been moved from.
+    /// Arbitrary callback/nested costs are not inferred; use for_prefix before reserving.
+    /// Example: `auto r = program.requirements().for_prefix(stack.cursor(), stack.depth());`.
+    const stack_requirements& requirements() const noexcept;
     /// Borrows emitted read requirements; absent positional inputs are unused.
     /// Precondition: this handle has not been moved from.
     /// Example: `auto reads = program.argument_reads();`.
@@ -252,6 +389,10 @@ public:
     /// Borrows the complete frozen result descriptor.
     /// Example: `auto extent = bound.result_type().byte_layout();`.
     const value_type& result_type() const noexcept { return _result; }
+    /// Borrows the frozen program's canonical frame reservation requirements.
+    /// Precondition: this handle has not been moved from.
+    /// Example: `auto r = bound.requirements().for_prefix(stack.cursor(), stack.depth());`.
+    const stack_requirements& requirements() const noexcept;
     /// Executes trusted canonical inputs and transfers one owned result into caller storage.
     /// Safety preconditions: this binding is live; arguments have prepared arity;
     /// each emitted read's descriptor and live aligned canonical extent matches its bound type
@@ -370,6 +511,11 @@ public:
     /// Transfers typed binding ownership.
     /// Complexity: O(old binding metadata and last-owned captures).
     prepared_segment& operator=(prepared_segment&&) noexcept = default;
+    /// Borrows the frozen program's canonical frame reservation requirements.
+    /// Precondition: this handle has not been moved from.
+    /// Composite conversions and arbitrary callback/nested costs are not inferred.
+    /// Example: `auto r = bound.requirements().for_prefix(stack.cursor(), stack.depth());`.
+    const stack_requirements& requirements() const noexcept { return _binding.requirements(); }
     /// Executes with borrowed const inputs and returns a disjoint result.
     /// Precondition: the handle is live, and inputs have no mutable alias accessed by callbacks.
     /// Exceptions propagate after suffix cleanup; inputs and caller prefix remain owned.
