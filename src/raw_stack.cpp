@@ -27,6 +27,16 @@ void borrowed_value::require_type(const value_type& expected) const {
     if (!detail::type_access::same_plan(expected, type)) detail::require_compatible(expected, type);
 }
 raw_stack::raw_stack() : _state(std::make_unique<detail::stack_state>()) {}
+raw_stack::phase_guard::phase_guard(raw_stack& stack) noexcept : _state(stack._state.get()) {
+    assert(!_state || !_state->phase_active);
+    if (_state) {
+        if (_state->phase_active) std::terminate();
+        _state->phase_active = true;
+    }
+}
+raw_stack::phase_guard::~phase_guard() noexcept {
+    if (_state) _state->phase_active = false;
+}
 raw_stack::~raw_stack() {
     if (_state && _state->active) std::terminate();
     truncate(0);
@@ -50,19 +60,27 @@ detail::stack_state& raw_stack::state() {
     if (!_state) _state = std::make_unique<detail::stack_state>();
     return *_state;
 }
+void raw_stack::require_idle() const {
+    if (_state && _state->phase_active)
+        throw std::logic_error("stack access during a canonical ownership phase");
+}
 void raw_stack::require_access(const frame* owner) const {
+    require_idle();
     if ((_state ? _state->active : nullptr) != owner)
         throw std::logic_error("only the innermost frame may mutate this stack");
 }
 void raw_stack::reserve(std::size_t bytes, std::size_t alignment) {
     require_access(nullptr);
     auto& data = state();
+    phase_guard phase(*this);
     data.bytes.reserve(bytes, alignment);
     data.slots.reserve(bytes);
 }
 void raw_stack::reserve_depth(std::size_t count) {
     require_access(nullptr);
-    state().slots.reserve(count);
+    auto& data = state();
+    phase_guard phase(*this);
+    data.slots.reserve(count);
 }
 std::size_t raw_stack::depth() const noexcept { return _state ? _state->slots.size() : 0; }
 std::size_t raw_stack::cursor() const noexcept { return _state ? _state->cursor : 0; }
@@ -99,6 +117,8 @@ void raw_stack::publish(const value_type& type, std::size_t offset) noexcept {
 void raw_stack::push_written(const value_type& type,
                              const void* source,
                              void (*write)(const void*, const value_type&, std::byte*)) {
+    (void)state();
+    phase_guard phase(*this);
     const auto offset = prepare(type);
     auto* destination = _state->bytes.data();
     write(source, type, destination ? destination + offset : nullptr);
@@ -111,6 +131,8 @@ void raw_stack::clone(const value& source) {
                  });
 }
 void raw_stack::take(value& source) {
+    (void)state();
+    phase_guard phase(*this);
     const auto type = source.type();
     const auto offset = prepare(type);
     auto* destination = _state->bytes.data();
@@ -141,6 +163,7 @@ const std::byte* raw_stack::borrow(std::size_t floor,
 void raw_stack::truncate(std::size_t floor) noexcept {
     assert(floor <= depth());
     if (!_state) return;
+    phase_guard phase(*this);
     auto& data = *_state;
     // Retire owners in reverse stack order, retaining metadata until each owner dies.
     while (data.slots.size() > floor) {
@@ -153,6 +176,7 @@ void raw_stack::truncate(std::size_t floor) noexcept {
 }
 value raw_stack::extract(std::size_t floor) {
     if (depth() <= floor) throw std::out_of_range("operand underflow");
+    phase_guard phase(*this);
     const auto& slot = _state->slots.back();
     auto result = detail::value_access::take(
         slot.type, _state->bytes.data() ? _state->bytes.data() + slot.offset : nullptr);
@@ -161,6 +185,7 @@ value raw_stack::extract(std::size_t floor) {
     return result;
 }
 void raw_stack::release(std::size_t floor, const value_type& expected, std::byte* destination) {
+    phase_guard phase(*this);
     const auto* source = borrow_trusted(floor, 0, expected);
     const auto size = expected.byte_layout().size;
     if (size != 0) std::memcpy(destination, source, size);
@@ -182,11 +207,13 @@ value raw_stack::pop_value() {
 frame::frame(raw_stack& stack, std::span<const value> arguments, const void* context) :
     _stack(&stack), _parent(stack.state().active), _checkpoint(stack.depth()),
     _arguments(arguments), _context(context) {
+    stack.require_idle();
     stack._state->active = this;
 }
 frame::frame(raw_stack& stack, std::span<const borrowed_value> arguments, const void* context) :
     _stack(&stack), _parent(stack.state().active), _checkpoint(stack.depth()),
     _canonical_arguments(arguments), _context(context) {
+    stack.require_idle();
     std::ranges::for_each(arguments, require_bytes);
     stack._state->active = this;
 }

@@ -110,6 +110,14 @@ Only the innermost lexical frame mutates the stack. Direct stack mutation and
 movement while a frame is active throw `std::logic_error`. The stack and
 argument sources outlive all frames that borrow them.
 
+Canonical construction, concrete operand acquisition, and payload retirement
+hold a nonallocating stack-owned phase gate. Reentrant mutation, extraction,
+execution, and new frame entry during these phases throw `std::logic_error`.
+Clone and destruction hooks must not mutate the same stack; noexcept destruction
+hooks catch a rejected request if they attempt one. The gate restores access
+after exceptions and ends before the ordinary operation callback, so callbacks
+can still push operands and evaluate nested frames.
+
 Frame destruction and execution failure retire only the acquired suffix,
 preserving the checkpoint prefix. A nested frame uses the same stack with its
 own checkpoint and explicitly borrowed arguments/context; no thread-local
@@ -119,6 +127,9 @@ nested frames with the input view used by their caller. `push_argument(index)`
 clones only an emitted read, directly into canonical stack bytes; unused inputs
 are not copied. Canonical input bytes and descriptors must remain live and must
 not alias mutable evaluation storage.
+Null canonical input bytes represent any zero-byte layout, including non-unit
+aggregates such as a tuple of two unit fields; the complete descriptor still
+distinguishes their shapes.
 
 `reserve(bytes, alignment)` reserves payload storage and at least `bytes` active
 slots. Use `reserve_depth(count)` for additional zero-byte unit operands.

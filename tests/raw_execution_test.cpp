@@ -27,18 +27,46 @@ std::size_t allocation_calls = 0;
 bool count_allocations = false;
 /// Injects one isolated allocation failure and then restores normal allocation.
 bool fail_next_allocation = false;
+/// Fails a later ordinary allocation after recording earlier acquired temporary storage.
+int allocations_before_failure = -1;
+/// Watches the first successful allocation in the bounded acquisition-failure test.
+void* acquired_argument = nullptr;
+/// Counts release of the watched temporary argument.
+int acquired_argument_releases = 0;
+/// Runs one bounded allocation callback to probe stable-byte acquisition reentry.
+void (*allocation_probe)() = nullptr;
 /// Counts ordinary allocations, propagating allocation failure.
 void* operator new(std::size_t size) {
+    if (allocation_probe) {
+        auto* probe = allocation_probe;
+        allocation_probe = nullptr;
+        probe();
+    }
+    if (allocations_before_failure == 0) {
+        allocations_before_failure = -1;
+        throw std::bad_alloc();
+    }
+    const bool watch = allocations_before_failure > 0;
+    if (watch) --allocations_before_failure;
     if (fail_next_allocation) {
         fail_next_allocation = false;
         throw std::bad_alloc();
     }
     if (count_allocations) ++allocation_calls;
-    if (auto* result = std::malloc(size == 0 ? 1 : size)) return result;
+    if (auto* result = std::malloc(size == 0 ? 1 : size)) {
+        if (watch) acquired_argument = result;
+        return result;
+    }
     throw std::bad_alloc();
 }
 /// Releases ordinary storage.
-void operator delete(void* pointer) noexcept { std::free(pointer); }
+void operator delete(void* pointer) noexcept {
+    if (pointer && pointer == acquired_argument) {
+        acquired_argument = nullptr;
+        ++acquired_argument_releases;
+    }
+    std::free(pointer);
+}
 /// Counts aligned allocations using the platform's matching allocation facility.
 void* operator new(std::size_t size, std::align_val_t alignment) {
     if (fail_next_allocation) {
@@ -105,6 +133,7 @@ TEST_CASE("empty frames and mixed leaves preserve stack order and cursor") {
         CHECK(scope.pop<bool>());
         CHECK(stack.cursor() == 0);
     }
+
     CHECK(stack.depth() == 0);
     stack.push(7.0);
     {
@@ -558,4 +587,275 @@ TEST_CASE("empty deferred-element arrays retain their legal ownership across raw
     CHECK(empty.size() == 0);
     CHECK(stack.pop_value().type().element().kind() == cel::type_kind::callable);
     CHECK(stack.depth() == 0);
+}
+
+/// Records bounded hook reentry attempts without relying on an invalid raw signature.
+struct reentry_state {
+    cel::raw_stack& stack;        ///< Borrows the tested stack.
+    cel::frame* scope;            ///< Borrows the active scope, or null during direct clear.
+    int rejected = 0;             ///< Counts documented logic-error rejections.
+    bool unexpected = false;      ///< Records any other exception from noexcept destruction probes.
+    bool propagate = false;       ///< Lets a clone rejection escape to test rollback.
+    bool clone_attempted = false; ///< Bounds clone reentry to one attempt.
+    bool destroy_attempted = false; ///< Bounds retirement reentry to one attempt.
+    /// Attempts same-owner mutation and both forms of nested frame entry.
+    void probe() {
+        try {
+            if (scope)
+                scope->push(99.0);
+            else
+                stack.push(99.0);
+        } catch (const std::logic_error&) {
+            ++rejected;
+            if (propagate) throw;
+        }
+        try {
+            cel::frame nested(stack);
+        } catch (const std::logic_error&) {
+            ++rejected;
+        }
+        try {
+            cel::frame nested(stack, std::span<const cel::borrowed_value>{});
+        } catch (const std::logic_error&) {
+            ++rejected;
+        }
+    }
+};
+/// Enables hooks only during their bounded test scopes, never as production context.
+reentry_state* active_reentry = nullptr;
+/// Restores the test hook context before its borrowed state dies, including on exceptions.
+struct reentry_scope {
+    reentry_state* previous; ///< Retains the prior single-threaded hook context.
+    /// Borrows the state for this bounded probe scope.
+    explicit reentry_scope(reentry_state& state) : previous(active_reentry) {
+        active_reentry = &state;
+    }
+    /// Disallows duplicated hook-scope ownership.
+    reentry_scope(const reentry_scope&) = delete;
+    /// Disallows reassigned hook-scope ownership.
+    reentry_scope& operator=(const reentry_scope&) = delete;
+    /// Restores the prior context and clears any pending allocation probe.
+    ~reentry_scope() {
+        active_reentry = previous;
+        allocation_probe = nullptr;
+    }
+};
+/// Clones a synthetic owner after a bounded construction reentry attempt.
+void clone_reentry(const std::byte* source, std::byte* target) {
+    if (active_reentry && !active_reentry->clone_attempted) {
+        active_reentry->clone_attempted = true;
+        active_reentry->probe();
+    }
+    std::memcpy(target, source, sizeof(void*));
+    ++live_resources;
+}
+/// Retires a synthetic owner while catching rejection inside its noexcept hook.
+void destroy_reentry(std::byte*) noexcept {
+    if (active_reentry && !active_reentry->destroy_attempted) {
+        active_reentry->destroy_attempted = true;
+        try {
+            active_reentry->probe();
+        } catch (...) {
+            active_reentry->unexpected = true;
+        }
+    }
+    --live_resources;
+}
+/// Probes reentry during the first allocation of a concrete vector extraction.
+void probe_acquisition() { active_reentry->probe(); }
+
+/// Catches clone/write offset reuse and retiring-slot mutation at safe boundaries.
+TEST_CASE("payload clone and noexcept retirement hooks reject reentry") {
+    const auto type = cel::detail::type_access::install_callable_ownership(
+        cel::value_type::callable({}, cel::value_type::leaf<double>()),
+        {clone_reentry, destroy_reentry});
+    std::array<std::byte, sizeof(void*)> bytes{};
+    auto source = cel::detail::value_access::copy(type, bytes.data());
+    const auto baseline = live_resources;
+    cel::raw_stack stack;
+    stack.reserve(1024, 256);
+    stack.push(17.0);
+    {
+        cel::frame scope(stack);
+        reentry_state attempts{stack, &scope};
+        reentry_scope enabled(attempts);
+        scope.push_clone(source);
+        CHECK(attempts.rejected == 3);
+        CHECK(scope.depth() == 1);
+        cel::detail::frame_access::discard(scope, scope.depth());
+        CHECK(attempts.rejected == 6);
+        CHECK_FALSE(attempts.unexpected);
+        active_reentry = nullptr;
+        CHECK(live_resources == baseline);
+        scope.push(8.0);
+        CHECK(scope.pop<double>() == 8.0);
+    }
+    CHECK(stack.pop<double>() == 17.0);
+    stack.push_clone(source);
+    reentry_state direct{stack, nullptr};
+    direct.clone_attempted = true;
+    reentry_scope enabled_direct(direct);
+    stack.clear();
+    active_reentry = nullptr;
+    CHECK(direct.rejected == 3);
+    CHECK_FALSE(direct.unexpected);
+    CHECK(stack.depth() == 0);
+    stack.push(true);
+    CHECK(stack.pop<bool>());
+}
+
+/// Catches a gate left held after a rejected clone callback unwinds through execute.
+TEST_CASE("rejected clone reentry rolls back only the frame suffix and restores access") {
+    const auto type = cel::detail::type_access::install_callable_ownership(
+        cel::value_type::callable({}, cel::value_type::leaf<double>()),
+        {clone_reentry, destroy_reentry});
+    std::array<std::byte, sizeof(void*)> bytes{};
+    auto source = cel::detail::value_access::copy(type, bytes.data());
+    cel::raw_stack stack;
+    stack.reserve(1024, 256);
+    stack.push(std::vector{4.0, 5.0});
+    cel::raw_segment sequence;
+    cel::detail::segment_access::append(sequence,
+                                        [&source](cel::frame& scope) { scope.push_clone(source); });
+    {
+        cel::frame scope(stack);
+        scope.push(std::vector{9.0});
+        reentry_state attempts{stack, &scope};
+        attempts.propagate = true;
+        reentry_scope enabled(attempts);
+        CHECK_THROWS_AS(sequence.execute(scope), std::logic_error);
+        active_reentry = nullptr;
+        CHECK(scope.depth() == 0);
+        scope.push(7.0);
+        CHECK(scope.pop<double>() == 7.0);
+        cel::frame nested(stack);
+        nested.push(false);
+        CHECK_FALSE(nested.pop<bool>());
+    }
+    CHECK(stack.pop<std::vector<double>>() == std::vector{4.0, 5.0});
+}
+
+/// Catches source-byte invalidation by an allocator callback during safe concrete extraction.
+TEST_CASE("stable operand acquisition rejects mutation and frame entry") {
+    cel::raw_stack stack;
+    stack.reserve(1024, 256);
+    stack.push(10.0);
+    {
+        cel::frame scope(stack);
+        scope.push(std::vector{2.0, 3.0});
+        reentry_state attempts{stack, &scope};
+        reentry_scope enabled(attempts);
+        allocation_probe = probe_acquisition;
+        const auto extracted = scope.pop<std::vector<double>>();
+        allocation_probe = nullptr;
+        active_reentry = nullptr;
+        CHECK(attempts.rejected == 3);
+        CHECK(extracted == std::vector{2.0, 3.0});
+        CHECK(scope.depth() == 0);
+        scope.push(true);
+        CHECK(scope.pop<bool>());
+    }
+    CHECK(stack.pop<double>() == 10.0);
+}
+
+/// Catches leaked earlier arguments and unintended invocation after later materialization fails.
+TEST_CASE("later composite argument acquisition failure releases earlier temporaries") {
+    cel::raw_stack stack;
+    stack.reserve(1024, 256);
+    stack.push(std::vector{11.0});
+    bool invoked = false;
+    cel::raw_segment sequence;
+    sequence.push_op2<void, std::vector<double>, std::vector<double>>(
+        [&invoked](cel::frame&, std::vector<double>, std::vector<double>) { invoked = true; });
+    {
+        cel::frame scope(stack);
+        scope.push(std::vector{1.0, 2.0});
+        scope.push(std::vector{3.0, 4.0});
+        acquired_argument_releases = 0;
+        allocations_before_failure = 1;
+        bool failed = false;
+        try {
+            sequence.execute(scope);
+        } catch (const std::bad_alloc&) {
+            failed = true;
+        }
+        allocations_before_failure = -1;
+        CHECK(failed);
+        CHECK_FALSE(invoked);
+        CHECK(acquired_argument == nullptr);
+        CHECK(acquired_argument_releases == 1);
+        CHECK(scope.depth() == 0);
+        scope.push(std::vector{6.0});
+        CHECK(scope.pop<std::vector<double>>() == std::vector{6.0});
+    }
+    CHECK(stack.pop<std::vector<double>>() == std::vector{11.0});
+}
+
+/// Verifies null bytes preserve non-unit zero-byte aggregate identity and stack effects.
+TEST_CASE("borrowed non-unit zero-byte aggregates preserve complete shape") {
+    using aggregate = std::tuple<std::tuple<>, std::tuple<>>;
+    const auto type = cel::detail::concrete_adapter<aggregate>::type();
+    const std::array inputs{cel::borrowed_value{type, nullptr}};
+    cel::raw_stack stack;
+    cel::frame scope(stack, inputs);
+    CHECK(type.byte_layout().size == 0);
+    CHECK(type.fields().size() == 2);
+    CHECK_FALSE(type.same_shape(cel::value_type{}));
+    CHECK(scope.argument(0).as<aggregate>() == aggregate{});
+    scope.push_argument(0);
+    auto owner = scope.pop_value();
+    CHECK(owner.type().same_shape(type));
+    CHECK(owner.size() == 2);
+    scope.push_take(owner);
+    CHECK(scope.pop<aggregate>() == aggregate{});
+    CHECK(scope.depth() == 0);
+    CHECK(stack.cursor() == 0);
+}
+
+/// Verifies allocating raw reads share the phase gate and release it on reader failure.
+TEST_CASE("scoped canonical acquisition and direct writers contain reentry") {
+    cel::raw_stack stack;
+    stack.reserve(1024, 256);
+    stack.push(15.0);
+    {
+        cel::frame scope(stack);
+        scope.push(std::vector{7.0, 8.0});
+        const auto type = cel::detail::concrete_adapter<std::vector<double>>::type();
+        reentry_state attempts{stack, &scope};
+        reentry_scope enabled(attempts);
+        allocation_probe = probe_acquisition;
+        const auto acquired = cel::detail::frame_access::acquire(scope, [&](const auto& operands) {
+            return cel::detail::value_access::copy(type, operands.operand(0, type));
+        });
+        allocation_probe = nullptr;
+        active_reentry = nullptr;
+        CHECK(attempts.rejected == 3);
+        CHECK(acquired.as<std::vector<double>>() == std::vector{7.0, 8.0});
+        CHECK(scope.depth() == 1);
+        CHECK_THROWS_AS(cel::detail::frame_access::acquire(scope,
+                                                           [&](const auto& operands) -> double {
+                                                               (void)operands.operand(0, type);
+                                                               throw std::runtime_error(
+                                                                   "reader failed");
+                                                           }),
+                        std::runtime_error);
+        CHECK(scope.pop<std::vector<double>>() == std::vector{7.0, 8.0});
+        reentry_state writer{stack, &scope};
+        reentry_scope enabled_writer(writer);
+        const auto scalar_type = cel::value_type::leaf<double>();
+        const double input = 3.0;
+        cel::detail::frame_access::push(
+            scope, scalar_type, &input,
+            [](const void* source, const cel::value_type&, std::byte* target) {
+                active_reentry->probe();
+                std::memcpy(target, source, sizeof(double));
+            });
+        active_reentry = nullptr;
+        CHECK(writer.rejected == 3);
+        CHECK(scope.pop<double>() == 3.0);
+        cel::frame nested(stack);
+        nested.push(false);
+        CHECK_FALSE(nested.pop<bool>());
+    }
+    CHECK(stack.pop<double>() == 15.0);
 }

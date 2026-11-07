@@ -56,8 +56,8 @@ class raw_segment {
         /// Complexity: O(operand payload size) time and concrete argument space.
         template <std::size_t... I>
         void invoke(frame& scope, std::index_sequence<I...>) const {
-            std::tuple<Args...> arguments{
-                scope.template read_operand<Args>(sizeof...(Args) - 1 - I, inputs[I])...};
+            auto arguments =
+                scope.template acquire_operands<Args...>(inputs, std::index_sequence<I...>{});
             scope.discard(sizeof...(Args));
             if constexpr (std::is_void_v<R>) {
                 std::apply([&](auto&... args) { std::invoke(callback, scope, std::move(args)...); },
@@ -102,7 +102,8 @@ public:
     /// Client callback work and owning composite results have their own costs.
     /// Precondition: the trusted program's complete signatures match the live suffix.
     /// On an exception, retires this frame's whole suffix and preserves its checkpoint prefix.
-    /// Throws logic_error if a nested frame is active; checked depth/layout failures throw.
+    /// Throws logic_error if a nested frame or canonical phase is active.
+    /// Checked depth/layout failures throw.
     /// Complexity: O(instructions + operand/result payload work).
     /// Example: `program.execute(scope);`.
     void execute(frame& scope) const;

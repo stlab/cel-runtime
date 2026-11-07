@@ -2,10 +2,12 @@
 #ifndef CEL_RUNTIME_RAW_STACK_HPP
 #define CEL_RUNTIME_RAW_STACK_HPP
 
+#include <array>
 #include <cel/runtime/value.hpp>
 #include <cstddef>
 #include <memory>
 #include <span>
+#include <tuple>
 #include <utility>
 
 namespace cel {
@@ -24,7 +26,7 @@ struct frame_access;
 /// borrowed_value input{type, reinterpret_cast<const std::byte*>(&n)};`.
 struct borrowed_value {
     const value_type& type; ///< Borrows live immutable canonical metadata.
-    const std::byte* data;  ///< Borrows initialized canonical bytes; null is valid only for unit.
+    const std::byte* data;  ///< Borrows canonical bytes; null is valid for any zero-byte layout.
 private:
     /// Checks concrete shape/operation compatibility before safe extraction.
     /// Complexity: O(compared shape size) time/space for distinct plans.
@@ -47,16 +49,46 @@ public:
 /// Only internal canonical carriers transfer bytewise; public facades never do.
 /// Moving requires no active frames; the owner outlives every borrowed frame.
 /// Exclusive access is required, including during nested evaluation.
+/// Canonical construction, operand acquisition, and retirement hold a nonallocating phase gate.
+/// Reentrant mutation, extraction, execution, and frame entry throw logic_error during a phase.
+/// Ordinary operation callbacks run outside the gate and may push or evaluate nested frames.
 /// Example: `raw_stack s; s.reserve(256, 256); s.push(2.0); auto n = s.pop<double>();`.
 class raw_stack {
     std::unique_ptr<detail::stack_state> _state;
     friend class frame;
     friend struct detail::frame_access;
 
+    /// Excludes reentrant stack access while stable canonical bytes or slots are required.
+    /// Precondition: the state is idle; checked entry points establish this invariant.
+    class phase_guard {
+        detail::stack_state* _state;
+
+    public:
+        /// Acquires the stack-owned phase state without allocating.
+        explicit phase_guard(raw_stack& stack) noexcept;
+        /// Restores the idle state on normal and exceptional exit.
+        ~phase_guard() noexcept;
+        /// Disallows duplicated phase ownership.
+        phase_guard(const phase_guard&) = delete;
+        /// Disallows phase reassignment.
+        phase_guard& operator=(const phase_guard&) = delete;
+    };
     /// Creates the state of a moved-from reusable stack if needed.
     detail::stack_state& state();
-    /// Rejects mutation outside the innermost active frame.
+    /// Rejects reentry during a canonical ownership phase.
+    void require_idle() const;
+    /// Rejects canonical-phase reentry and mutation outside the innermost active frame.
     void require_access(const frame* owner) const;
+    /// Materializes a checked top operand while keeping its source bytes stable.
+    /// Throws out_of_range on underflow and invalid_argument on complete type mismatch.
+    /// Complexity: O(payload + compared shape size) time and result space.
+    template <class T>
+    T read_value(std::size_t floor) {
+        if (depth() <= floor) throw std::out_of_range("operand underflow");
+        phase_guard phase(*this);
+        const auto type = detail::concrete_adapter<T>::type();
+        return detail::concrete_adapter<T>::read(type, borrow(floor, 0, type));
+    }
     /// Prepares one aligned unowned slot without changing active depth or cursor.
     /// Complexity: O(retained bytes + slots) time and space on growth.
     std::size_t prepare(const value_type& type);
@@ -112,10 +144,10 @@ public:
     /// Disallows copied assignment.
     raw_stack& operator=(const raw_stack&) = delete;
     /// Transfers storage and live slots; leaves other empty and reusable.
-    /// Throws logic_error if other has active frames.
+    /// Throws logic_error if other has an active frame or canonical phase.
     raw_stack(raw_stack&& other);
     /// Releases prior payloads and transfers other; self-assignment is unchanged.
-    /// Throws logic_error if either stack has active frames.
+    /// Throws logic_error if either stack has an active frame or canonical phase.
     /// Complexity: O(old slots + visited old payload ownership paths).
     raw_stack& operator=(raw_stack&& other);
     /// Reserves bytes, alignment, and at least bytes live slots without changing the cursor.
@@ -162,8 +194,7 @@ public:
     template <class T>
     T pop() {
         require_access(nullptr);
-        auto result = detail::concrete_adapter<T>::read(
-            detail::concrete_adapter<T>::type(), borrow(0, 0, detail::concrete_adapter<T>::type()));
+        auto result = read_value<T>(0);
         truncate(depth() - 1);
         return result;
     }
@@ -189,6 +220,8 @@ public:
 /// Destruction retires its suffix and preserves its checkpoint's live prefix.
 /// Frames are nonmovable and nested in lexical LIFO order; stack and arguments outlive them.
 /// Only the innermost frame mutates the stack; context grants no mutable ownership.
+/// Construction throws logic_error while the stack's canonical phase gate is held.
+/// Mutating calls and execution also reject phase reentry; argument views remain borrowed.
 /// Example: `raw_stack s; frame f(s); f.push(2.0); auto n = f.pop<double>();`.
 class frame {
     raw_stack* _stack;
@@ -214,6 +247,17 @@ class frame {
         return detail::concrete_adapter<T>::read(
             expected, _stack->borrow_trusted(_checkpoint, from_top, expected));
     }
+    /// Acquires ordered concrete operands under one stable-byte phase.
+    /// Precondition: complete instruction signatures match the frame suffix.
+    /// Failed acquisition releases earlier temporary arguments before restoring the phase.
+    /// Complexity: O(operand payload size) time and concrete argument space.
+    template <class... T, std::size_t... I>
+    std::tuple<T...> acquire_operands(const std::array<value_type, sizeof...(T)>& types,
+                                      std::index_sequence<I...>) const {
+        require_active();
+        raw_stack::phase_guard phase(*_stack);
+        return {read_operand<T>(sizeof...(T) - 1 - I, types[I])...};
+    }
     /// Removes consumed operands above the checkpoint.
     /// Throws out_of_range on underflow.
     /// Complexity: O(count + visited payload ownership paths).
@@ -233,6 +277,7 @@ class frame {
 
 public:
     /// Checkpoints stack depth and explicitly borrows arguments and context.
+    /// Throws logic_error if a canonical ownership phase is active.
     /// Example: `frame scope(stack, arguments, &client_context);`.
     explicit frame(raw_stack& stack,
                    std::span<const value> arguments = {},
@@ -241,6 +286,7 @@ public:
     /// Precondition: every descriptor/initialized source outlives the frame and its nested uses;
     /// sources do not alias the stack's mutable bytes.
     /// Throws invalid_argument for missing or misaligned nonempty source bytes.
+    /// Throws logic_error if a canonical ownership phase is active.
     /// Complexity: O(argument count) time; does not copy or allocate argument payloads.
     /// Example: `frame scope(stack, canonical_inputs, &client_context);`.
     frame(raw_stack& stack,
@@ -300,9 +346,7 @@ public:
     template <class T>
     T pop() {
         require_active();
-        auto result = detail::concrete_adapter<T>::read(
-            detail::concrete_adapter<T>::type(),
-            _stack->borrow(_checkpoint, 0, detail::concrete_adapter<T>::type()));
+        auto result = _stack->read_value<T>(_checkpoint);
         discard(1);
         return result;
     }
