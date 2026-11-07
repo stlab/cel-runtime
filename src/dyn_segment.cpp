@@ -31,6 +31,7 @@ struct frozen_program : retirement_node {
         retirement_node(dispose_program), body(std::move(input)), reads(std::move(arguments)),
         result(std::move(output)), requirements(required), origin(ambient) {}
     /// Detaches the owned arena before deleting ordinary immutable metadata.
+    /// Complexity: O(released read/result metadata); captures retire through the queue.
     static void dispose_program(retirement_node& base, retirement_queue& queue) noexcept {
         auto& program = static_cast<frozen_program&>(base);
         segment_access::retire(program.body, queue);

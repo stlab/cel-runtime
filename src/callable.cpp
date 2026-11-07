@@ -16,6 +16,7 @@ struct callable_state : retirement_node {
     callable_state(prepared_raw_segment input, value_type type) :
         retirement_node(dispose_state), body(std::move(input)), signature(std::move(type)) {}
     /// Retires the prepared executable edge before deleting its guard and descriptors.
+    /// Complexity: O(released binding/signature metadata); child code retires through the queue.
     static void dispose_state(retirement_node& base, retirement_queue& queue) noexcept {
         auto& state = static_cast<callable_state&>(base);
         segment_access::retire(state.body, queue);

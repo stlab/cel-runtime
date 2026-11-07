@@ -38,7 +38,7 @@ public:
     /// Disallows duplicated assignment.
     retirement_queue& operator=(const retirement_queue&) = delete;
     /// Drains every dying descendant without allocating traversal storage.
-    /// Complexity: O(retired nodes, ownership edges, and capture destruction work).
+    /// Complexity: O(retired nodes/edges + released metadata + client destructor work).
     ~retirement_queue() {
         while (_pending) {
             auto* current = _pending;
@@ -79,20 +79,20 @@ public:
     /// Transfers the ownership reference and empties the source.
     retirement_ptr(retirement_ptr&& other) noexcept : _node(std::exchange(other._node, nullptr)) {}
     /// Releases the reference and iteratively disposes any last-owned descendants.
-    /// Complexity: O(last-owned nodes, edges, and capture destruction work).
+    /// Complexity: O(last-owned nodes/edges + released metadata + client destructor work).
     ~retirement_ptr() {
         retirement_queue queue;
         retire(queue);
     }
     /// Shares another handle, retaining it before releasing prior ownership; self-copy is safe.
-    /// Complexity: O(prior last-owned nodes, edges, and capture destruction work).
+    /// Complexity: O(prior last-owned nodes/edges + released metadata + client destructor work).
     retirement_ptr& operator=(const retirement_ptr& other) noexcept {
         retirement_ptr next(other);
         swap(next);
         return *this;
     }
     /// Transfers another handle and releases prior ownership; self-move is unchanged.
-    /// Complexity: O(prior last-owned nodes, edges, and capture destruction work).
+    /// Complexity: O(prior last-owned nodes/edges + released metadata + client destructor work).
     retirement_ptr& operator=(retirement_ptr&& other) noexcept {
         if (this != &other) {
             retirement_ptr next(std::move(other));
