@@ -23,9 +23,10 @@ Public `value` copies have independent mutable aggregate payloads.
 `at`, `field`, and concrete extraction return independent copies.
 `set` and `set_field` replace exact complete children without exposing mutable
 internal references. Empty arrays retain an explicit element type, and an
-empty tuple represents source unit. Aggregate payloads contain bool/f64 leaves
-and their admitted nested composites; callable results can instead have any
-valid complete owned type, including registered client leaves and callables.
+empty tuple represents source unit. Ordinary aggregates, including recursively
+nested vectors and tuples, can contain valid trivially copyable client leaves.
+Callable parameter admission is narrower; see
+[Bind and receive callable results](#runtime_callable_binding).
 
 ## Choose a checked or prepared call
 
@@ -138,10 +139,12 @@ same origin. Only the selected body executes, but both bodies' declared reads
 participate in parent preflight. `logical_and` and `logical_or` short-circuit
 bool bodies under the same origin/read rules.
 
-## Bind and receive callable results
+## Bind and receive callable results {#runtime_callable_binding}
 
 Bind an independent frozen body with explicit full parameter declarations
 using `callable(body, parameters)` or `push_closure(body, parameters)`.
+Parameters admit bool/f64 and their supported composites; results admit any
+valid complete owned type, including client leaves and callables.
 Include unused parameters; checked `call` validates every declared parameter
 and arity before body effects. The body has no implicit lexical environment.
 Explicit instruction captures and borrowed client callback references are

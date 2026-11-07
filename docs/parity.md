@@ -22,7 +22,8 @@ The following entries cover the retained runtime surfaces:
 | Tuple packing at exact origin; source-order ownership transfer | [structural tests](../tests/composite_execution_test.cpp): “nested packing consumes source order and preserves exact owners” | [dyn_segment.rs:792–825][rust-dyn] | Implemented; origin includes logical depth |
 | Typed arrays, empty arrays, zero-byte elements, nested owning payloads | [structural tests](../tests/composite_execution_test.cpp) packing and invalid-shape cases; [value tests](../tests/value_test.cpp) | [dyn_segment.rs:852–916][rust-dyn] | Implemented |
 | Record packing and source-to-schema permutation validation | [structural tests](../tests/composite_execution_test.cpp): “record schema permutation leaves expression effects source ordered”, invalid shapes/permutations, duplicate/wrong-length rejection | [registered_ops.rs:41–90,176–255][rust-record] | Implemented runtime emitter; Rust emitter is parser-side |
-| Consuming tuple and record projection; sibling retirement without selected-child cloning | [structural tests](../tests/composite_execution_test.cpp): “consuming projection transfers selected owners and retires siblings without cloning” | [dyn_segment.rs:931–955][rust-dyn] for tuple; [registered_ops.rs:41–90][rust-record] covers record construction only | Implemented/tested; exact Rust record-projection source anchor remains an evidence gap |
+| Consuming tuple projection; sibling retirement without selected-child cloning | [structural tests](../tests/composite_execution_test.cpp): “consuming projection transfers selected owners and retires siblings without cloning” | [dyn_segment.rs:931–955][rust-dyn] | Implemented/tested |
+| Consuming canonical record projection; sibling retirement without selected-child cloning | [structural tests](../tests/composite_execution_test.cpp): “consuming projection transfers selected owners and retires siblings without cloning” | [lib.rs:1809–1826][rust-member-parser], [registered_ops.rs:414–435][rust-member-emitter], [geometry.rs:48–58,160–178][rust-native-fields] | Implemented/tested; canonical carrier/interface adaptation of registered field selection |
 | Consuming array indexing; safe f64 rejection and prefix restoration | [structural tests](../tests/composite_execution_test.cpp): “invalid floating indices reject safely and restore prefixes” | [dyn_segment.rs:958–985][rust-dyn] | Implemented; deliberate f64 index adaptation |
 | Bounded, inclusive, from, to, to-inclusive, full ranges; endpoint order and complete form identity | [structural tests](../tests/composite_execution_test.cpp): “every range kind retains endpoint metadata and source order”; [value tests](../tests/value_test.cpp) | [op_table.rs:929–1018,1525–1583,1623–1643][rust-ranges] | All six implemented; no floating iteration law |
 | Dependent origins; lazy conditional/and/or; exact result join; merged reads and selected effects | [structural tests](../tests/composite_execution_test.cpp), including lazy read/preflight and logical-or cases | [dyn_segment.rs:189–229,1149–1162,1460–1509][rust-dyn] | Implemented; byte/depth origin adaptation |
@@ -54,7 +55,36 @@ with these boundaries:
 - f64 indexing uses representability checks before casting and exact integer
   bounds before access. Ranges retain metadata without inventing iteration.
 
-## Unfinished integration and evidence
+## Named record field selection {#runtime_record_selection}
+
+Rust named field access follows the registered member-operation path:
+
+1. [`Parser::is_postfix_expression`][rust-member-parser] reads the identifier
+   after `.` and calls `context.apply_member`.
+2. [`DynSegmentContext::apply_member`][rust-member-context] computes
+   receiver-plus-explicit-argument arity.
+3. [Context lookup][rust-member-context-lookup] delegates to `lookup_scoped`.
+4. [Scoped member dispatch][rust-member-dispatch] selects operation-only lookup,
+   rather than ordinary callable-name dispatch.
+5. [Operation lookup][rust-member-lookup] searches eligible scopes in LIFO
+   order, then registered signatures.
+6. [The registered emitter][rust-member-emitter] matches arity and complete
+   operand types, emits the operation, and annotates its complete result.
+
+[Native geometry field registrations][rust-native-fields] supply concrete
+by-value receiver callbacks for `x`, `y`, `origin`, `size`, `min`, and `max`.
+The helper at `cel-euclid/src/geometry.rs:48–58` binds exact operand/result
+descriptors and emits `s.op1(op)`; registrations appear at lines 160–178.
+[Record schema registrations][rust-native-records] provide Point2D, Vector2D,
+and Size2D schemas.
+
+C++ `project_record(name)` provides generic consuming selection on the canonical
+record carrier. It adapts this field-selection interface; Rust does not expose
+a same-named generic primitive. The native geometry callbacks do not establish
+a generic Rust recursive sibling-retirement routine or identical host layout.
+C++ ownership guarantees come from its canonical contract and structural tests.
+
+## Unfinished integration
 
 The runtime does not contain a parser, registry, overload resolution, scope
 precedence, registered built-ins, literal spelling rules, or source diagnostics.
@@ -62,14 +92,6 @@ The parser milestone must enumerate the full applicable built-in census,
 including extension rejection, rather than infer coverage from this runtime
 table. It must add parser and differential parity tests at that boundary.
 No cross-language differential runner has executed in this milestone.
-
-One exact evidence gap remains: the current Rust record-projection emitter
-anchor. The supplied Rust record contracts cover construction/permutation,
-not projection. A targeted Scout lookup of `project_record` in
-`cel-parser/src/registered_ops.rs` returned registration/construction ranges,
-not a projection emitter; do not substitute those for projection evidence.
-The C++ consuming-projection test remains authoritative for its implemented
-contract.
 
 [rust-stack]: https://github.com/stlab/cel-rs/blob/03d658f8b12acabe1d6a2503281e7c86cf00b6a3/cel-runtime/src/raw_stack.rs#L24-L76
 [rust-raw]: https://github.com/stlab/cel-rs/blob/03d658f8b12acabe1d6a2503281e7c86cf00b6a3/cel-runtime/src/raw_segment.rs#L68-L433
@@ -81,3 +103,11 @@ contract.
 [rust-ranges]: https://github.com/stlab/cel-rs/blob/03d658f8b12acabe1d6a2503281e7c86cf00b6a3/cel-parser/src/op_table.rs
 [rust-closure]: https://github.com/stlab/cel-rs/blob/03d658f8b12acabe1d6a2503281e7c86cf00b6a3/cel-runtime/src/dyn_closure.rs
 [rust-callable]: https://github.com/stlab/cel-rs/blob/03d658f8b12acabe1d6a2503281e7c86cf00b6a3/cel-runtime/src/callable.rs#L14-L18
+[rust-member-parser]: https://github.com/stlab/cel-rs/blob/03d658f8b12acabe1d6a2503281e7c86cf00b6a3/cel-parser/src/lib.rs#L1809-L1826
+[rust-member-context]: https://github.com/stlab/cel-rs/blob/03d658f8b12acabe1d6a2503281e7c86cf00b6a3/cel-parser/src/parser_context.rs#L846-L858
+[rust-member-context-lookup]: https://github.com/stlab/cel-rs/blob/03d658f8b12acabe1d6a2503281e7c86cf00b6a3/cel-parser/src/parser_context.rs#L743-L763
+[rust-member-dispatch]: https://github.com/stlab/cel-rs/blob/03d658f8b12acabe1d6a2503281e7c86cf00b6a3/cel-parser/src/op_table.rs#L2057-L2095
+[rust-member-lookup]: https://github.com/stlab/cel-rs/blob/03d658f8b12acabe1d6a2503281e7c86cf00b6a3/cel-parser/src/op_table.rs#L2030-L2051
+[rust-member-emitter]: https://github.com/stlab/cel-rs/blob/03d658f8b12acabe1d6a2503281e7c86cf00b6a3/cel-parser/src/registered_ops.rs#L414-L435
+[rust-native-fields]: https://github.com/stlab/cel-rs/blob/03d658f8b12acabe1d6a2503281e7c86cf00b6a3/cel-euclid/src/geometry.rs#L48-L178
+[rust-native-records]: https://github.com/stlab/cel-rs/blob/03d658f8b12acabe1d6a2503281e7c86cf00b6a3/cel-euclid/src/records.rs#L78-L80

@@ -19,6 +19,13 @@ Public signatures remain those accepted before packaging. See
 contracts and [the parity ledger](parity.md) for test/source evidence and
 deliberate Rust differences.
 
+Rust named fields use registered exact unary/member operations, with native
+by-value geometry callbacks as concrete examples. C++ canonical
+`project_record(name)` adapts that interface; it is not a same-named Rust
+primitive or a claim of identical host layout. See
+[Named record field selection](@ref runtime_record_selection) for the
+revision-bound dispatch/emitter evidence and its ownership limits.
+
 ## Integrate parser emission
 
 The parser integration must preserve these runtime requirements:
