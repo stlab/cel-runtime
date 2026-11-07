@@ -67,8 +67,11 @@ The runtime does not implement registry lookup, temporary/persistent scope
 ordering, registered built-in overloads, lexical adapters, grammar, or source
 diagnostics. The parser's operation census and contract-derived parser tests
 must cover those surfaces. Rust proc-macro token production is not a C++ text
-lexer. Differential execution and error/span comparison remain integration
-work, not completed evidence.
+lexer. Parser P4 adds public differential execution and error/span comparisons,
+with explicit group/EOF and approved type/syntax adaptations. Its feature
+handoff preserves the distinction between shared comparisons and runtime's
+independent ownership, prefix, allocation-rollback, and reentry contracts.
+Independent final port review and remote/platform validation remain pending.
 
 ## Reproduce local validation
 

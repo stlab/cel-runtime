@@ -85,14 +85,25 @@ a same-named generic primitive. The native geometry callbacks do not establish
 a generic Rust recursive sibling-retirement routine or identical host layout.
 C++ ownership guarantees come from its canonical contract and structural tests.
 
-## Unfinished integration
+## Parser integration boundary
 
 The runtime does not contain a parser, registry, overload resolution, scope
 precedence, registered built-ins, literal spelling rules, or source diagnostics.
 The parser milestone must enumerate the full applicable built-in census,
 including extension rejection, rather than infer coverage from this runtime
-table. It must add parser and differential parity tests at that boundary.
-No cross-language differential runner has executed in this milestone.
+table. Parser P4 now supplies public Rust/C++ differential fixtures, a decoded
+expression cache, and installed composite/callable clients at that boundary.
+The parser's `docs/p4-handoff.md` and `docs/validation.md` distinguish actual
+comparisons from independent C++ prefix/ownership/resource contracts and
+explicit syntax/type adaptations. Runtime table entries remain runtime
+contract evidence, not a claim that every low-level mechanism has an identical
+public Rust driver.
+
+P4 measurements keep direct prepared scalar execution separate from ordinary
+named scalar calls, whose parser emits owning marker/result intermediates.
+Native nested-array conversion, erased owning results, and dynamic invocation
+have separate allocation/timing passes. Those local costs do not alter the
+runtime's zero-allocation direct scalar contract or establish portable speed.
 
 [rust-stack]: https://github.com/stlab/cel-rs/blob/03d658f8b12acabe1d6a2503281e7c86cf00b6a3/cel-runtime/src/raw_stack.rs#L24-L76
 [rust-raw]: https://github.com/stlab/cel-rs/blob/03d658f8b12acabe1d6a2503281e7c86cf00b6a3/cel-runtime/src/raw_segment.rs#L68-L433
