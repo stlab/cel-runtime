@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: BSL-1.0
+cmake_minimum_required(VERSION 3.24)
+project(installed_runtime_consumer LANGUAGES CXX)
+
+find_package(cel-runtime CONFIG REQUIRED)
+get_target_property(runtime_imported cel::runtime IMPORTED)
+if(NOT runtime_imported)
+    message(FATAL_ERROR "The consumer requires an installed imported target")
+endif()
+
+include(CTest)
+add_executable(installed_runtime_consumer main.cpp)
+target_link_libraries(installed_runtime_consumer PRIVATE cel::runtime)
+add_executable(installed_getting_started ../../examples/getting_started.cpp)
+target_link_libraries(installed_getting_started PRIVATE cel::runtime)
+foreach(target installed_runtime_consumer installed_getting_started)
+    set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /WX)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    add_test(NAME ${target} COMMAND ${target})
+endforeach()
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/imported-runtime-$<CONFIG>.txt"
+    CONTENT "library=$<TARGET_FILE:cel::runtime>\nheaders=$<TARGET_PROPERTY:cel::runtime,INTERFACE_INCLUDE_DIRECTORIES>\n")
