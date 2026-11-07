@@ -2,9 +2,9 @@
 
 This C++20 library gives runtime clients complete type descriptors and
 independently owned values with checked canonical byte layouts, reusable
-operand stacks, and stored operation sequences.
-Aligned storage is private. The library does not include checked compilation,
-callable bodies, control-flow emission, or a parser.
+operand stacks, checked builders, and frozen prepared operation sequences.
+Aligned storage is private. The library does not include callable bodies,
+control-flow emission, operation lookup, or a parser.
 
 ## Construct and copy values
 
@@ -103,7 +103,7 @@ in a stable standard arena. Capture destructors run before arena release.
 Referenced external callback state remains borrowed and is not made thread-safe.
 
 The raw program requires matching complete operand signatures and ownership
-operations above its frame checkpoint. A later checked builder can establish
+operations above its frame checkpoint. The checked builder establishes
 those invariants once. Safe stack/frame `push` and `pop` reject invalid
 accesses; concrete `pop` also checks the complete type, not merely its byte size.
 Only the innermost lexical frame mutates the stack. Direct stack mutation and
@@ -140,6 +140,105 @@ transfer canonical ownership across public value boundaries without
 byte-relocating the facades; public result extraction acquires outer storage.
 The private checked-builder bridge can instead transfer results directly into
 pre-reserved canonical result bytes without allocation or descriptor comparison.
+
+## Build checked and prepared programs
+
+Use the dynamic builder to declare positional reads and exact stack effects:
+
+```cpp
+#include <cel/runtime/dyn_segment.hpp>
+
+cel::dyn_segment builder;
+builder.push_argument(0, cel::value_type::leaf<double>());
+builder.just(cel::value::from(3.0));
+builder.op2<double, double, double>(
+    [](double older, double newer) { return older - newer; });
+auto program = std::move(builder).finish();
+
+cel::raw_stack stack;
+stack.reserve(1024, 256);
+auto bound = program.prepare<double, double>();
+const double result = bound.call(stack, 8.0); // 5.0
+```
+
+`op<R, Args...>` is the arbitrary-arity primitive. Dynamic `op1<A, R>`,
+`op2<A, B, R>`, and `op3<A, B, C, R>` list operands before the result.
+Ordinary callbacks receive only their older-first operands, as const
+callbacks; the raw interface separately supplies frame-aware operations.
+Named callback parameters match the declared operands after cv/reference
+removal. Callbacks return the declared result or a reference to it, with
+independent result ownership. No implicit operand/result type conversions
+authorize another CEL signature. Callback exceptions replace Result-shaped
+operation error transport.
+
+Construction rejects operand underflow, complete type/ownership mismatch,
+and conflicting declarations of a positional read. `finish()` rejects more
+than one final operand; an empty stack produces source unit.
+`execute(stack, values)` checks every emitted read before any callback effect.
+`argument_reads()` and `result_type()` expose the frozen boundary requirements.
+Extra unused inputs are permitted and are not materialized.
+
+`prepare<R, Args...>()` binds complete recursive adapters once. Typed calls
+borrow scalar addresses and clone only emitted reads. Unused composite inputs
+are not converted. Scalar dispatch on a warmed, sufficiently reserved stack
+allocates no public value boxes or descriptors and compares no signatures.
+Tuple/vector inputs and results use their trusted canonical adapters and may
+allocate independent owning representations. Root signatures admit valid
+client leaves, including over-aligned leaves; callable-parameter restrictions
+do not apply to ordinary root programs.
+
+All program and prepared handles are move-only. Prepared factories share a
+deliberately reference-semantic frozen engine, retaining captures and metadata
+after the builder or compiled handle disappears. This sharing does not promise
+independent mutable capture copies or thread safety. Callbacks may reference
+external caller-owned state. No callback may mutate an alias of borrowed
+inputs during a call. Exceptions retire the execution suffix without allocating
+cleanup storage and preserve the caller's prefix.
+
+The static builder seeds its declared initial arguments as physical owned reads:
+
+```cpp
+#include <cel/runtime/segment.hpp>
+
+cel::segment<cel::type_list<double, double>> builder;
+auto difference = std::move(builder).op2<double>(
+    [](double older, double newer) { return older - newer; });
+auto program = std::move(difference).finish();
+auto bound = program.prepare<double, double, double>();
+cel::raw_stack stack;
+const double result = bound.call(stack, 10.0, 2.0); // 8.0
+```
+
+Static `op0<R>` pushes; `op1<R>` replaces the top; binary and ternary
+operations infer the current suffix types. `op<R, Operands...>` consumes an
+exact explicitly declared suffix. `R = void` consumes without pushing;
+an empty final stack becomes `std::tuple<>`. Finalization is unavailable for
+multiple remaining operands. Template ascription cannot erase initial operands
+or construct a dependent stack snapshot.
+
+## Transfer trusted canonical results
+
+Use `prepare_raw(argument_types, result_type)` for runtime-bound record,
+range, or installed callable-carrier identities without one static facade.
+Preparation checks complete shape and ownership plans, including recursively
+installed opaque operations.
+
+`call_into(stack, inputs, destination)` is a raw safety boundary, not a
+conversion or validation interface. Supply prepared arity and live, aligned,
+exact canonical extents for every emitted read. Descriptors and input bytes
+outlive the call and must not alias mutated stack or result storage. Unused
+slots may contain source-unit placeholders. Reserve uninitialized, aligned,
+disjoint outer storage with the frozen result's byte extent. Null represents
+any zero-byte canonical layout, not only source unit.
+
+After success, you own the initialized result. Call
+`destroy_result(destination)` on that same live binding exactly once to
+retire its ownership without freeing your outer buffer. You can then reuse
+or free the buffer. Never destroy a failed call's uninitialized destination,
+an already retired result, or a byte-transferred source. Call errors leave
+the destination uninitialized and retire the execution suffix. The frozen
+raw call performs no signature comparisons, conversions, or public owner
+boxing; composite cloning and callback work retain their documented costs.
 
 ## Use byte layouts
 

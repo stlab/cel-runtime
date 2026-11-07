@@ -1,0 +1,625 @@
+// SPDX-License-Identifier: BSL-1.0
+#include "type_ops.hpp"
+#include "value_ops.hpp"
+#include <cel/runtime/dyn_segment.hpp>
+#include <cel/runtime/segment.hpp>
+
+#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include <array>
+#include <cstdlib>
+#include <doctest/doctest.h>
+#include <limits>
+#include <memory>
+#include <tuple>
+#include <vector>
+#if defined(_WIN32)
+#include <malloc.h>
+#endif
+
+/// Enables bounded allocation measurement without counting test machinery.
+bool measure_allocations = false;
+/// Counts allocations inside measured real prepared calls.
+std::size_t allocations = 0;
+/// Injects a single allocation failure during real canonical acquisition.
+bool fail_allocation = false;
+/// Fails one selected later allocation to exercise ordered argument cleanup.
+int fail_after = -1;
+/// Counts ordinary allocations and supplies isolated failure injection.
+void* operator new(std::size_t size) {
+    if (fail_allocation || fail_after == 0) {
+        fail_allocation = false;
+        fail_after = -1;
+        throw std::bad_alloc();
+    }
+    if (fail_after > 0) --fail_after;
+    if (measure_allocations) ++allocations;
+    if (auto* result = std::malloc(size == 0 ? 1 : size)) return result;
+    throw std::bad_alloc();
+}
+/// Releases ordinary storage.
+void operator delete(void* pointer) noexcept { std::free(pointer); }
+/// Counts aligned allocations through the platform's matching storage facility.
+void* operator new(std::size_t size, std::align_val_t alignment) {
+    if (fail_allocation) {
+        fail_allocation = false;
+        throw std::bad_alloc();
+    }
+    if (measure_allocations) ++allocations;
+    const auto align = static_cast<std::size_t>(alignment);
+    const auto extent = size == 0 ? std::size_t{1} : size;
+    if (extent > std::numeric_limits<std::size_t>::max() - (align - 1)) throw std::bad_alloc();
+    const auto rounded = ((extent + align - 1) / align) * align;
+#if defined(_WIN32)
+    auto* result = _aligned_malloc(rounded, align);
+#else
+    auto* result = std::aligned_alloc(align, rounded);
+#endif
+    if (!result) throw std::bad_alloc();
+    return result;
+}
+/// Releases aligned storage.
+void operator delete(void* pointer, std::align_val_t) noexcept {
+#if defined(_WIN32)
+    _aligned_free(pointer);
+#else
+    std::free(pointer);
+#endif
+}
+/// Releases sized ordinary storage.
+void operator delete(void* pointer, std::size_t) noexcept { ::operator delete(pointer); }
+/// Releases sized aligned storage.
+void operator delete(void* pointer, std::size_t, std::align_val_t alignment) noexcept {
+    ::operator delete(pointer, alignment);
+}
+/// Measures a bounded loop and restores instrumentation on exceptional exit.
+struct allocation_measurement {
+    /// Starts allocation counting.
+    allocation_measurement() {
+        allocations = 0;
+        measure_allocations = true;
+    }
+    /// Stops counting before assertions allocate.
+    ~allocation_measurement() { measure_allocations = false; }
+};
+
+/// Counts live synthetic callable-carrier owners without implementing callable bodies.
+int live_carriers = 0;
+/// Clones an independently owned integer through the foundation's opaque ownership contract.
+void clone_carrier(const std::byte* source, std::byte* destination) {
+    int* pointer = nullptr;
+    std::memcpy(static_cast<void*>(&pointer), source, sizeof(pointer));
+    auto owner = std::make_unique<int>(*pointer);
+    pointer = owner.release();
+    std::memcpy(destination, static_cast<const void*>(&pointer), sizeof(pointer));
+    ++live_carriers;
+}
+/// Retires one initialized synthetic carrier.
+void destroy_carrier(std::byte* bytes) noexcept {
+    int* pointer = nullptr;
+    std::memcpy(static_cast<void*>(&pointer), bytes, sizeof(pointer));
+    delete pointer;
+    --live_carriers;
+}
+/// Supplies an incompatible ownership pair with the same semantic signature.
+void destroy_other_carrier(std::byte* bytes) noexcept { destroy_carrier(bytes); }
+
+/// Detects whether a final static stack admits standalone finalization.
+template <class T>
+concept finishable = requires(T builder) {
+    std::move(builder).finish();
+};
+
+/// Exercises root admission independently of callable-parameter restrictions.
+struct alignas(256) client_leaf {
+    int number; ///< Retains a client-defined scalar.
+};
+
+TEST_CASE("dynamic ordered mixed operations freeze reads and literals") {
+    cel::dyn_segment builder;
+    builder.push_argument(1, cel::value_type::leaf<double>());
+    builder.just(cel::value::from(true));
+    builder.push_argument(0, cel::value_type::leaf<double>());
+    builder.op3<double, bool, double, double>(
+        [](double older, bool flag, double newer) { return flag ? older - newer : 0.0; });
+    auto program = std::move(builder).finish();
+    const std::array inputs{cel::value::from(2.0), cel::value::from(10.0)};
+    cel::raw_stack stack;
+    CHECK(program.execute(stack, inputs).as<double>() == 8.0);
+    auto typed = program.prepare<double, double, double>();
+    CHECK(typed.call(stack, 3.0, 12.0) == 9.0);
+    CHECK(stack.depth() == 0);
+}
+
+TEST_CASE("checked signatures reject errors before callback effects") {
+    int effects = 0;
+    cel::dyn_segment builder;
+    builder.op0<double>([&effects] {
+        ++effects;
+        return 2.0;
+    });
+    builder.push_argument(1, cel::value_type::leaf<double>());
+    builder.op2<double, double, double>([](double a, double b) { return a + b; });
+    auto program = std::move(builder).finish();
+    cel::raw_stack stack;
+    const std::array wrong{cel::value::from(2.0), cel::value::from(true)};
+    CHECK_THROWS_AS(program.execute(stack, wrong), std::invalid_argument);
+    CHECK_THROWS_AS(program.execute(stack, {}), std::invalid_argument);
+    CHECK_THROWS_AS((program.prepare<double, double>()), std::invalid_argument);
+    CHECK_THROWS_AS((program.prepare<bool, double, double>()), std::invalid_argument);
+    CHECK(effects == 0);
+    CHECK(stack.depth() == 0);
+}
+
+TEST_CASE("construction rejects underflow mismatches and conflicting reads") {
+    cel::dyn_segment builder;
+    CHECK_THROWS_AS((builder.op1<double, double>([](double n) { return n; })),
+                    std::invalid_argument);
+    builder.push_argument(0, cel::value_type::leaf<bool>());
+    CHECK_THROWS_AS((builder.op1<double, double>([](double n) { return n; })),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(builder.push_argument(0, cel::value_type::leaf<double>()),
+                    std::invalid_argument);
+    auto program = std::move(builder).finish();
+    cel::raw_stack stack;
+    CHECK(program.prepare<bool, bool>().call(stack, true));
+}
+
+TEST_CASE("recursive preparation mismatch preserves nominal and leaf identity") {
+    using input = std::tuple<std::vector<double>, bool>;
+    cel::dyn_segment builder;
+    builder.push_argument(0, cel::detail::concrete_adapter<input>::type());
+    auto program = std::move(builder).finish();
+    CHECK_THROWS_AS((program.prepare<input, std::tuple<std::vector<bool>, bool>>()),
+                    std::invalid_argument);
+    CHECK_THROWS_AS((program.prepare<std::tuple<std::vector<double>, double>, input>()),
+                    std::invalid_argument);
+    cel::raw_stack stack;
+    const std::array wrong{cel::value::from(std::tuple{std::vector{true}, true})};
+    CHECK_THROWS_AS(program.execute(stack, wrong), std::invalid_argument);
+}
+
+TEST_CASE("frozen captures and literals outlive their builders and sources") {
+    auto prepared = [] {
+        cel::dyn_segment builder;
+        auto literal = cel::value::from(std::vector{2.0, 3.0});
+        builder.just(std::move(literal));
+        builder.op1<std::vector<double>, std::vector<double>>(
+            [factor = std::make_unique<double>(4.0)](std::vector<double> numbers) {
+                numbers[0] *= *factor;
+                return numbers;
+            });
+        return std::move(builder).finish().prepare<std::vector<double>>();
+    }();
+    cel::raw_stack stack;
+    auto first = prepared.call(stack);
+    first[0] = 99.0;
+    CHECK(prepared.call(stack) == std::vector<double>{8.0, 3.0});
+    CHECK(first[0] == 99.0);
+}
+
+TEST_CASE("typed composite calls borrow inputs and return disjoint nested results") {
+    using input = std::tuple<std::vector<std::vector<double>>, bool>;
+    cel::dyn_segment builder;
+    builder.push_argument(0, cel::detail::concrete_adapter<input>::type());
+    auto prepared = std::move(builder).finish().prepare<input, input>();
+    cel::raw_stack stack;
+    input source{{{1.0, 2.0}}, true};
+    auto first = prepared.call(stack, source);
+    auto second = prepared.call(stack, source);
+    std::get<0>(first)[0][0] = 7.0;
+    CHECK(std::get<0>(source)[0][0] == 1.0);
+    CHECK(std::get<0>(second)[0][0] == 1.0);
+    std::get<0>(source)[0][1] = 9.0;
+    CHECK(std::get<0>(second)[0][1] == 2.0);
+}
+
+TEST_CASE("valid over-aligned client root arguments and results are admitted") {
+    cel::dyn_segment builder;
+    builder.push_argument(0, cel::value_type::leaf<client_leaf>());
+    builder.op1<client_leaf, client_leaf>(
+        [](client_leaf source) { return client_leaf{source.number + 1}; });
+    auto prepared = std::move(builder).finish().prepare<client_leaf, client_leaf>();
+    cel::raw_stack stack;
+    stack.reserve(2048, 256);
+    CHECK(prepared.call(stack, client_leaf{41}).number == 42);
+}
+
+TEST_CASE("static initial operands retain source order and type flow") {
+    cel::segment<cel::type_list<double, bool, double>> builder;
+    auto operation = std::move(builder).op3<double>(
+        [](double a, bool b, double c) { return b ? a - c : c - a; });
+    auto prepared = std::move(operation).finish().prepare<double, double, bool, double>();
+    cel::raw_stack stack;
+    CHECK(prepared.call(stack, 10.0, true, 2.0) == 8.0);
+    cel::segment<cel::type_list<double>> identity;
+    CHECK(std::move(identity).finish().prepare<double, double>().call(stack, 6.0) == 6.0);
+    cel::segment<cel::type_list<>> empty;
+    CHECK(std::move(empty).finish().prepare<std::tuple<>>().call(stack) == std::tuple<>{});
+}
+
+TEST_CASE("static pushes unary binary arbitrary arity and void source unit") {
+    cel::segment<cel::type_list<double>> builder;
+    auto unary = std::move(builder).op1<bool>([](double n) { return n > 0.0; });
+    auto pushed = std::move(unary).op0<double>([] { return 3.0; });
+    auto binary = std::move(pushed).op2<double>([](bool b, double n) { return b ? n : -n; });
+    auto consumed = std::move(binary).op<void, double>([](double) {});
+    cel::raw_stack stack;
+    CHECK(std::move(consumed).finish().prepare<std::tuple<>, double>().call(stack, 2.0) ==
+          std::tuple<>{});
+}
+
+TEST_CASE("finalization rejects silent leftover operand discard") {
+    cel::dyn_segment builder;
+    builder.just(cel::value::from(true));
+    builder.just(cel::value::from(2.0));
+    CHECK_THROWS_AS(std::move(builder).finish(), std::invalid_argument);
+}
+
+TEST_CASE("runtime-bound owning output has a public retirement boundary") {
+    cel::dyn_segment builder;
+    builder.op0<std::vector<std::vector<double>>>(
+        [] { return std::vector<std::vector<double>>{{2.0}, {3.0}}; });
+    auto program = std::move(builder).finish();
+    auto prepared = program.prepare_raw({}, program.result_type());
+    const auto layout = prepared.result_type().byte_layout();
+    auto* destination =
+        static_cast<std::byte*>(::operator new(layout.size, std::align_val_t(layout.alignment)));
+    cel::raw_stack stack;
+    prepared.call_into(stack, {}, destination);
+    auto first = cel::borrowed_value{prepared.result_type(), destination}
+                     .as<std::vector<std::vector<double>>>();
+    prepared.destroy_result(destination);
+    first[0][0] = 8.0;
+    prepared.call_into(stack, {}, destination);
+    CHECK(cel::borrowed_value{prepared.result_type(), destination}
+              .as<std::vector<std::vector<double>>>()[0][0] == 2.0);
+    prepared.destroy_result(destination);
+    ::operator delete(destination, std::align_val_t(layout.alignment));
+    CHECK(stack.depth() == 0);
+}
+
+TEST_CASE("runtime-bound exact record identity and shared deep metadata") {
+    const std::array fields{cel::record_field{"flag", cel::value_type::leaf<bool>()}};
+    auto type = cel::value_type::record("named", fields);
+    cel::dyn_segment builder;
+    builder.push_argument(0, type);
+    auto program = std::move(builder).finish();
+    const std::array wrong{cel::value_type::record("other", fields)};
+    CHECK_THROWS_AS(program.prepare_raw(wrong, type), std::invalid_argument);
+    const std::array arguments{type};
+    auto prepared = program.prepare_raw(arguments, type);
+    const std::array contents{cel::value::from(true)};
+    auto source = cel::value::record(type, contents);
+    const std::array views{cel::borrowed_value{type, cel::detail::value_access::data(source)}};
+    alignas(bool) std::array<std::byte, sizeof(bool)> result{};
+    cel::raw_stack stack;
+    prepared.call_into(stack, views, result.data());
+    CHECK(cel::detail::value_access::copy(type, result.data()).field("flag").as<bool>());
+    prepared.destroy_result(result.data());
+    auto deep = cel::value_type::leaf<bool>();
+    auto same = cel::value_type::leaf<bool>();
+    for (int i = 0; i != 32; ++i) {
+        const std::array left{deep, deep};
+        const std::array right{same, same};
+        deep = cel::value_type::tuple(left);
+        same = cel::value_type::tuple(right);
+    }
+    cel::dyn_segment shared;
+    shared.push_argument(0, deep);
+    auto shared_program = std::move(shared).finish();
+    const std::array shared_arguments{same};
+    CHECK_NOTHROW(shared_program.prepare_raw(shared_arguments, same));
+}
+
+TEST_CASE("throwing callbacks preserve caller prefix and reusable raw destination") {
+    bool fail = true;
+    cel::dyn_segment builder;
+    builder.push_argument(0, cel::value_type::leaf<double>());
+    builder.op1<double, double>([&fail](double n) {
+        if (fail) throw std::runtime_error("callback");
+        return n + 1.0;
+    });
+    auto program = std::move(builder).finish();
+    const std::array types{cel::value_type::leaf<double>()};
+    auto prepared = program.prepare_raw(types, types[0]);
+    cel::raw_stack stack;
+    stack.push(std::vector{7.0});
+    const auto cursor = stack.cursor();
+    double input = 2.0;
+    const std::array views{
+        cel::borrowed_value{types[0], reinterpret_cast<const std::byte*>(&input)}};
+    alignas(double) std::array<std::byte, sizeof(double)> result{};
+    result.fill(std::byte{0x5a});
+    CHECK_THROWS_AS(prepared.call_into(stack, views, result.data()), std::runtime_error);
+    CHECK(result[0] == std::byte{0x5a});
+    CHECK(stack.depth() == 1);
+    CHECK(stack.cursor() == cursor);
+    fail = false;
+    prepared.call_into(stack, views, result.data());
+    CHECK(cel::borrowed_value{types[0], result.data()}.as<double>() == 3.0);
+    prepared.destroy_result(result.data());
+    CHECK(stack.pop<std::vector<double>>() == std::vector<double>{7.0});
+}
+
+TEST_CASE("unused typed composite arguments are not materialized") {
+    cel::dyn_segment builder;
+    builder.op0<double>([] { return 5.0; });
+    auto bound = std::move(builder).finish().prepare<double, std::vector<double>>();
+    cel::raw_stack stack;
+    stack.reserve(256, 256);
+    const std::vector<double> unused(100, 7.0);
+    double result = 0.0;
+    std::size_t count = 0;
+    {
+        allocation_measurement measurement;
+        result = bound.call(stack, unused);
+        count = allocations;
+    }
+    CHECK(result == 5.0);
+    CHECK(count == 0);
+}
+
+TEST_CASE("reserved typed and runtime-bound scalar hot loops do not allocate") {
+    cel::dyn_segment builder;
+    builder.push_argument(0, cel::value_type::leaf<double>());
+    builder.just(cel::value::from(3.0));
+    builder.op2<double, double, double>([](double a, double b) { return a - b; });
+    auto program = std::move(builder).finish();
+    auto typed = program.prepare<double, double>();
+    const std::array types{cel::value_type::leaf<double>()};
+    auto raw = program.prepare_raw(types, types[0]);
+    cel::raw_stack stack;
+    stack.reserve(4096, 256);
+    CHECK(typed.call(stack, 5.0) == 2.0);
+    double input = 8.0;
+    const std::array views{
+        cel::borrowed_value{types[0], reinterpret_cast<const std::byte*>(&input)}};
+    alignas(double) std::array<std::byte, sizeof(double)> bytes{};
+    raw.call_into(stack, views, bytes.data());
+    raw.destroy_result(bytes.data());
+    double typed_total = 0.0;
+    double raw_total = 0.0;
+    std::size_t count = 0;
+    {
+        allocation_measurement measurement;
+        for (int i = 0; i != 1000; ++i) {
+            typed_total += typed.call(stack, input);
+            raw.call_into(stack, views, bytes.data());
+            raw_total += cel::detail::concrete_adapter<double>::read(types[0], bytes.data());
+            raw.destroy_result(bytes.data());
+        }
+        count = allocations;
+    }
+    CHECK(typed_total == 5000.0);
+    CHECK(raw_total == 5000.0);
+    CHECK(count == 0);
+    CHECK(stack.depth() == 0);
+}
+
+TEST_CASE("arbitrary arity repeated reads and reference results remain exact") {
+    cel::dyn_segment builder;
+    builder.push_argument(0, cel::value_type::leaf<double>());
+    builder.push_argument(0, cel::value_type::leaf<double>());
+    builder.op0<bool>([] { return true; });
+    builder.op0<double>([] { return 2.0; });
+    builder.op<double, double, double, bool, double>(
+        [](double a, double b, bool flag, double c) { return flag ? a + b + c : 0.0; });
+    builder.op1<double, double>([](double n) { return n + 1.0; });
+    auto bound = std::move(builder).finish().prepare<double, double>();
+    cel::raw_stack stack;
+    CHECK(bound.call(stack, 3.0) == 9.0);
+    cel::dyn_segment reference;
+    const std::vector<double> source{3.0};
+    reference.op0<std::vector<double>>(
+        [&source]() -> const std::vector<double>& { return source; });
+    auto copied = std::move(reference).finish().prepare<std::vector<double>>().call(stack);
+    copied[0] = 7.0;
+    CHECK(source[0] == 3.0);
+}
+
+TEST_CASE("raw acquisition and emitted clone failures clean suffixes and permit reuse") {
+    int effects = 0;
+    cel::dyn_segment builder;
+    const auto type = cel::detail::concrete_adapter<std::vector<double>>::type();
+    builder.push_argument(0, type);
+    builder.push_argument(0, type);
+    builder.op2<std::vector<double>, std::vector<double>, double>(
+        [&effects](std::vector<double> a, std::vector<double> b) {
+            ++effects;
+            return a[0] + b[0];
+        });
+    auto program = std::move(builder).finish();
+    const std::array types{type};
+    auto bound = program.prepare_raw(types, cel::value_type::leaf<double>());
+    const auto owner = cel::value::from(std::vector{2.0});
+    const std::array views{cel::borrowed_value{type, cel::detail::value_access::data(owner)}};
+    cel::raw_stack stack;
+    stack.reserve(4096, 256);
+    stack.push(std::vector{9.0});
+    const auto prefix = stack.cursor();
+    alignas(double) std::array<std::byte, sizeof(double)> bytes{};
+    bool clone_failed = false;
+    fail_allocation = true;
+    try {
+        bound.call_into(stack, views, bytes.data());
+    } catch (const std::bad_alloc&) {
+        clone_failed = true;
+    }
+    fail_allocation = false;
+    CHECK(clone_failed);
+    CHECK(effects == 0);
+    CHECK(stack.cursor() == prefix);
+    CHECK(stack.depth() == 1);
+    // Two clone allocations precede the two concrete vector acquisitions.
+    bool acquisition_failed = false;
+    fail_after = 3;
+    try {
+        bound.call_into(stack, views, bytes.data());
+    } catch (const std::bad_alloc&) {
+        acquisition_failed = true;
+    }
+    fail_after = -1;
+    CHECK(acquisition_failed);
+    CHECK(effects == 0);
+    CHECK(stack.cursor() == prefix);
+    CHECK(stack.depth() == 1);
+    bound.call_into(stack, views, bytes.data());
+    CHECK(cel::borrowed_value{bound.result_type(), bytes.data()}.as<double>() == 4.0);
+    bound.destroy_result(bytes.data());
+    CHECK(effects == 1);
+    CHECK(stack.pop<std::vector<double>>() == std::vector<double>{9.0});
+}
+
+TEST_CASE("frozen raw callable results bind complete ownership and retire independently") {
+    const auto signature = cel::value_type::callable({}, cel::value_type::leaf<client_leaf>());
+    const auto type = cel::detail::type_access::install_callable_ownership(
+        signature, {clone_carrier, destroy_carrier});
+    const auto other = cel::detail::type_access::install_callable_ownership(
+        signature, {clone_carrier, destroy_other_carrier});
+    const auto composite = cel::value_type::array(type);
+    const auto incompatible = cel::value_type::array(other);
+    int number = 42;
+    int* pointer = &number;
+    alignas(void*) std::array<std::byte, sizeof(pointer)> bytes{};
+    std::memcpy(bytes.data(), static_cast<const void*>(&pointer), sizeof(pointer));
+    CHECK(live_carriers == 0);
+    {
+        const auto owner = cel::detail::value_access::copy(type, bytes.data());
+        const std::array elements{owner};
+        auto literal = cel::value::array(type, elements);
+        cel::dyn_segment builder;
+        builder.just(std::move(literal));
+        auto program = std::move(builder).finish();
+        CHECK_THROWS_AS(program.prepare_raw({}, incompatible), std::invalid_argument);
+        CHECK_THROWS_AS(program.prepare_raw({}, cel::value_type::array(signature)),
+                        std::invalid_argument);
+        auto bound = program.prepare_raw({}, composite);
+        const auto layout = composite.byte_layout();
+        auto* result = static_cast<std::byte*>(
+            ::operator new(layout.size, std::align_val_t(layout.alignment)));
+        cel::raw_stack stack;
+        const auto baseline = live_carriers;
+        bound.call_into(stack, {}, result);
+        CHECK(live_carriers == baseline + 1);
+        bound.destroy_result(result);
+        CHECK(live_carriers == baseline);
+        bound.call_into(stack, {}, result);
+        CHECK(live_carriers == baseline + 1);
+        bound.destroy_result(result);
+        CHECK(live_carriers == baseline);
+        ::operator delete(result, std::align_val_t(layout.alignment));
+    }
+    CHECK(live_carriers == 0);
+}
+
+TEST_CASE("checked callable read pairs and range identities reject before effects") {
+    const auto signature = cel::value_type::callable({}, cel::value_type::leaf<bool>());
+    const auto type = cel::detail::type_access::install_callable_ownership(
+        signature, {clone_carrier, destroy_carrier});
+    const auto other = cel::detail::type_access::install_callable_ownership(
+        signature, {clone_carrier, destroy_other_carrier});
+    int effects = 0;
+    cel::dyn_segment builder;
+    builder.op0<void>([&effects] { ++effects; });
+    builder.push_argument(0, type);
+    CHECK_THROWS_AS(builder.push_argument(0, other), std::invalid_argument);
+    auto program = std::move(builder).finish();
+    const std::array wrong_types{other};
+    CHECK_THROWS_AS(program.prepare_raw(wrong_types, type), std::invalid_argument);
+    int number = 3;
+    int* pointer = &number;
+    alignas(void*) std::array<std::byte, sizeof(pointer)> bytes{};
+    std::memcpy(bytes.data(), static_cast<const void*>(&pointer), sizeof(pointer));
+    const std::array wrong_values{cel::detail::value_access::copy(other, bytes.data())};
+    cel::raw_stack stack;
+    CHECK_THROWS_AS(program.execute(stack, wrong_values), std::invalid_argument);
+    CHECK(effects == 0);
+    const auto range =
+        cel::value_type::range(cel::range_kind::range_full, cel::value_type::leaf<double>());
+    cel::dyn_segment ranges;
+    ranges.push_argument(0, range);
+    auto range_program = std::move(ranges).finish();
+    const std::array wrong_range{
+        cel::value_type::range(cel::range_kind::range_full, cel::value_type::leaf<bool>())};
+    CHECK_THROWS_AS(range_program.prepare_raw(wrong_range, range), std::invalid_argument);
+    const std::array right_range{range};
+    auto bound = range_program.prepare_raw(right_range, range);
+    const std::array range_input{cel::borrowed_value{range, nullptr}};
+    CHECK_NOTHROW(bound.call_into(stack, range_input, nullptr));
+    bound.destroy_result(nullptr);
+    CHECK(stack.depth() == 0);
+}
+
+TEST_CASE("zero-byte non-unit raw arguments retain complete recursive identity") {
+    using zero = std::tuple<std::tuple<>, std::tuple<>>;
+    const auto type = cel::detail::concrete_adapter<zero>::type();
+    cel::dyn_segment builder;
+    builder.push_argument(0, type);
+    auto program = std::move(builder).finish();
+    CHECK_THROWS_AS((program.prepare<std::tuple<>, zero>()), std::invalid_argument);
+    const std::array types{type};
+    auto bound = program.prepare_raw(types, type);
+    const std::array inputs{cel::borrowed_value{type, nullptr}};
+    cel::raw_stack stack;
+    CHECK_NOTHROW(bound.call_into(stack, inputs, nullptr));
+    bound.destroy_result(nullptr);
+    CHECK(program.prepare<zero, zero>().call(stack, zero{}) == zero{});
+}
+
+TEST_CASE("ordinary callbacks execute outside acquisition and retirement gates") {
+    cel::dyn_segment nested_builder;
+    nested_builder.op0<double>([] { return 4.0; });
+    auto nested = std::move(nested_builder).finish().prepare<double>();
+    cel::raw_stack stack;
+    stack.push(std::vector{9.0});
+    cel::dyn_segment builder;
+    builder.push_argument(0, cel::value_type::leaf<double>());
+    builder.op1<double, double>([&nested, &stack](double n) { return nested.call(stack) + n; });
+    auto bound = std::move(builder).finish().prepare<double, double>();
+    CHECK(bound.call(stack, 3.0) == 7.0);
+    CHECK(stack.pop<std::vector<double>>() == std::vector<double>{9.0});
+}
+
+TEST_CASE("static finalization and template ascription cannot erase live operands") {
+    using two = cel::segment<cel::type_list<double, bool>>;
+    using one = cel::segment<cel::type_list<double, bool>, cel::type_list<bool>>;
+    static_assert(!finishable<two>);
+    static_assert(!std::default_initializable<one>);
+    static_assert(!std::constructible_from<one, two>);
+    cel::segment<cel::type_list<double, double, bool, double>> builder;
+    auto combined = std::move(builder).op<double, double, double, bool, double>(
+        [](double a, double b, bool flag, double c) { return flag ? a + b - c : 0.0; });
+    cel::raw_stack stack;
+    CHECK(std::move(combined).finish().prepare<double, double, double, bool, double>().call(
+              stack, 10.0, 4.0, true, 2.0) == 12.0);
+}
+
+TEST_CASE("typed composite result construction and extraction failures retain prefix") {
+    cel::dyn_segment builder;
+    builder.op0<std::vector<double>>([] { return std::vector<double>{3.0}; });
+    auto bound = std::move(builder).finish().prepare<std::vector<double>>();
+    cel::raw_stack stack;
+    stack.reserve(4096, 256);
+    stack.push(std::vector{7.0});
+    const auto prefix = stack.cursor();
+    int allocation_index = 0;
+    SUBCASE("canonical result writer fails after callback result allocation") {
+        allocation_index = 1;
+    }
+    SUBCASE("concrete result read fails after canonical result publication") {
+        allocation_index = 2;
+    }
+    bool failed = false;
+    fail_after = allocation_index;
+    try {
+        (void)bound.call(stack);
+    } catch (const std::bad_alloc&) {
+        failed = true;
+    }
+    fail_after = -1;
+    CHECK(failed);
+    CHECK(stack.depth() == 1);
+    CHECK(stack.cursor() == prefix);
+    CHECK(bound.call(stack) == std::vector<double>{3.0});
+    CHECK(stack.pop<std::vector<double>>() == std::vector<double>{7.0});
+}
