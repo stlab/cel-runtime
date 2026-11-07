@@ -8,6 +8,9 @@
 /// Verifies installed scalar, independent nested-owner, and surviving callable results.
 /// Returns zero when cached execution preserves the caller prefix and all results match.
 int main() try {
+    if (!cel::value_type::leaf<double>().compatible_with(cel::value_type::leaf<double>()) ||
+        cel::value_type::leaf<double>().compatible_with(cel::value_type::leaf<bool>()))
+        return 9;
     cel::raw_stack stack;
     stack.push(true);
     const auto cursor = stack.cursor();
@@ -15,6 +18,11 @@ int main() try {
 
     cel::dyn_segment scalar;
     scalar.push_argument(0, cel::value_type::leaf<double>());
+    const auto operands = scalar.operand_types(1);
+    if (operands.size() != 1 || !operands[0].compatible_with(cel::value_type::leaf<double>()) ||
+        operands[0].compatible_with(cel::value_type::leaf<bool>()) ||
+        !scalar.operand_types(2).empty())
+        return 8;
     scalar.op1<double, double>([](double n) { return n * 2.0; });
     auto cached = std::move(scalar).finish().prepare<double, double>();
     const auto needed = cached.requirements().for_prefix(cursor, depth);

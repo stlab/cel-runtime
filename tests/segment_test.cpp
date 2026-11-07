@@ -114,6 +114,98 @@ struct alignas(256) client_leaf {
     int number; ///< Retains a client-defined scalar.
 };
 
+/// Catches byte-based counting, reversed suffixes, and inclusion of ambient operands.
+TEST_CASE("operand types borrow the older-first local logical suffix") {
+    cel::dyn_segment empty;
+    CHECK(empty.operand_types(0).empty());
+    CHECK(empty.operand_types(1).empty());
+    CHECK(empty.operand_types(std::numeric_limits<std::size_t>::max()).empty());
+    cel::dyn_segment builder(cel::stack_origin{128, 7});
+    CHECK(builder.operand_types(1).empty());
+    builder.just(cel::value::from(3.0));
+    builder.just(cel::value{});
+    builder.just(cel::value::from(true));
+    const auto operands = builder.operand_types(3);
+    REQUIRE(operands.size() == 3);
+    CHECK(operands[0].same_shape(cel::value_type::leaf<double>()));
+    CHECK(operands[1].same_shape(cel::value_type{}));
+    CHECK(operands[2].same_shape(cel::value_type::leaf<bool>()));
+    const auto suffix = builder.operand_types(2);
+    REQUIRE(suffix.size() == 2);
+    CHECK(suffix.data() == operands.data() + 1);
+    CHECK(suffix[0].byte_layout().size == 0);
+    CHECK(builder.operand_types(1).data() == operands.data() + 2);
+    CHECK(builder.operand_types(0).empty());
+    CHECK(builder.operand_types(4).empty());
+    CHECK(builder.origin() == cel::stack_origin{128, 7});
+}
+
+/// Catches allocating inspection, opcode publication, callback execution, or consumed operands.
+TEST_CASE("operand inspection leaves code types and callback effects unchanged") {
+    static_assert(noexcept(std::declval<const cel::dyn_segment&>().operand_types(1)));
+    static_assert(std::same_as<decltype(std::declval<const cel::dyn_segment&>().operand_types(1)),
+                               std::span<const cel::value_type>>);
+    int effects = 0;
+    cel::dyn_segment builder;
+    builder.op0<double>([&effects] {
+        ++effects;
+        return 10.0;
+    });
+    builder.just(cel::value::from(3.0));
+    const auto before = builder.snapshot();
+    const auto original = builder.operand_types(2);
+    std::span<const cel::value_type> observed;
+    {
+        allocation_measurement measurement;
+        observed = builder.operand_types(2);
+        (void)builder.operand_types(3);
+        (void)builder.operand_types(0);
+    }
+    CHECK(allocations == 0);
+    CHECK(effects == 0);
+    CHECK(builder.snapshot() == before);
+    REQUIRE(observed.size() == 2);
+    CHECK(observed.data() == original.data());
+    CHECK(observed[0].compatible_with(cel::value_type::leaf<double>()));
+    CHECK(observed[1].compatible_with(cel::value_type::leaf<double>()));
+    builder.op2<double, double, double>([](double older, double newer) { return older - newer; });
+    auto program = std::move(builder).finish();
+    cel::raw_stack stack;
+    CHECK(program.execute(stack, {}).as<double>() == 7.0);
+    CHECK(effects == 1);
+    CHECK(program.execute(stack, {}).as<double>() == 7.0);
+    CHECK(effects == 2);
+    CHECK(stack.depth() == 0);
+}
+
+/// Catches descriptors that borrow builder-owned plans instead of retaining immutable metadata.
+TEST_CASE("copied operand descriptors survive mutation move and builder destruction") {
+    const auto retained = [] {
+        cel::dyn_segment builder;
+        builder.just(cel::value::from(std::tuple{std::vector<double>{2.0}, true}));
+        auto copy = builder.operand_types(1).front();
+        builder.project_tuple(0);
+        auto moved = std::move(builder);
+        moved.just(cel::value::from(false));
+        return copy;
+    }();
+    const auto expected = cel::value_type::tuple(std::array{
+        cel::value_type::array(cel::value_type::leaf<double>()), cel::value_type::leaf<bool>()});
+    CHECK(retained.compatible_with(expected));
+    CHECK(retained.owns_values());
+}
+
+/// Catches converting allocating metadata comparison failures into an overload no-match.
+TEST_CASE("public compatibility propagates allocation failures") {
+    const auto fields = std::array{cel::value_type::leaf<double>()};
+    const auto first = cel::value_type::tuple(fields);
+    const auto second = cel::value_type::tuple(fields);
+    fail_allocation = true;
+    CHECK_THROWS_AS(first.compatible_with(second), std::bad_alloc);
+    fail_allocation = false;
+    CHECK(first.compatible_with(second));
+}
+
 TEST_CASE("dynamic ordered mixed operations freeze reads and literals") {
     cel::dyn_segment builder;
     builder.push_argument(1, cel::value_type::leaf<double>());

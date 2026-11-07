@@ -115,6 +115,15 @@ public:
     /// and O(distinct visited plan pairs) auxiliary space; shared DAGs are not expanded.
     /// Example: `value_type::leaf<bool>().same_shape(value_type::leaf<double>()) == false`.
     bool same_shape(const value_type& other) const;
+    /// Compares complete semantic shapes and compatible stored opaque ownership operations.
+    /// Returns false for any shape, layout, identity, or stored-operation mismatch.
+    /// Semantic comparison precedes ownership comparison; same_shape alone is insufficient.
+    /// Compatibility does not prove installed ownership or initialized borrowed canonical data.
+    /// Comparison can allocate and propagates allocation failures.
+    /// Complexity: O(distinct visited plan pairs, their edges, and name bytes) expected time
+    /// and O(distinct visited plan pairs) auxiliary space; shared DAGs are not expanded.
+    /// Example: `value_type::leaf<double>().compatible_with(value_type::leaf<bool>()) == false`.
+    bool compatible_with(const value_type& other) const;
     /// Returns the structural category.
     /// Example: `value_type{}.kind() == type_kind::tuple`.
     type_kind kind() const noexcept;

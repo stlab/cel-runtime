@@ -54,6 +54,54 @@ void destroy_test_owner(std::byte* data) noexcept {
 /// Supplies a distinct installed operation pair to test representation admission.
 void destroy_test_owner_alternative(std::byte* data) noexcept { destroy_test_owner(data); }
 
+/// Catches layout-only comparison and ownership traversal before unequal-shape rejection.
+TEST_CASE("public compatibility requires complete semantic shapes") {
+    const auto scalar = cel::value_type::leaf<double>();
+    CHECK(scalar.compatible_with(scalar));
+    CHECK(scalar.compatible_with(cel::value_type::leaf<double>()));
+    CHECK_FALSE(scalar.compatible_with(cel::value_type::leaf<bool>()));
+    CHECK_FALSE(scalar.compatible_with(cel::value_type::leaf<other_leaf>()));
+    CHECK(cel::value_type{}.compatible_with(cel::value_type{}));
+    const auto singleton = cel::value_type::tuple(std::array{scalar});
+    const auto pair = cel::value_type::tuple(std::array{scalar, scalar});
+    CHECK_FALSE(singleton.compatible_with(pair));
+    CHECK_FALSE(pair.compatible_with(singleton));
+    const auto fields = std::array{cel::record_field{"items", cel::value_type::array(scalar)}};
+    const auto record = cel::value_type::record("first", fields);
+    CHECK(record.compatible_with(cel::value_type::record("first", fields)));
+    CHECK_FALSE(record.compatible_with(cel::value_type::record("second", fields)));
+    const auto nested = cel::value_type::array(cel::value_type::array(singleton));
+    CHECK(nested.compatible_with(nested));
+    CHECK_FALSE(nested.compatible_with(cel::value_type::array(cel::value_type::array(pair))));
+    CHECK_FALSE(nested.compatible_with(cel::value_type::array(cel::value_type::array(
+        cel::value_type::tuple(std::array{cel::value_type::leaf<bool>()})))));
+}
+
+/// Catches conflating semantic signatures with stored opaque representation compatibility.
+TEST_CASE("public compatibility rejects nested foreign callable ownership operations") {
+    const auto signature = cel::value_type::callable({}, cel::value_type::leaf<double>());
+    const auto installed = cel::detail::type_access::install_callable_ownership(
+        signature, {clone_test_owner, destroy_test_owner});
+    const auto foreign = cel::detail::type_access::install_callable_ownership(
+        signature, {clone_test_owner, destroy_test_owner_alternative});
+    CHECK(signature.compatible_with(signature));
+    CHECK_FALSE(signature.owns_values());
+    CHECK(installed.compatible_with(installed));
+    CHECK(installed.same_shape(foreign));
+    CHECK_FALSE(installed.compatible_with(foreign));
+    CHECK_FALSE(foreign.compatible_with(installed));
+    const auto nested = cel::value_type::array(cel::value_type::record(
+        "callbacks",
+        std::array{cel::record_field{"stored", cel::value_type::tuple(std::array{installed})}}));
+    const auto nested_foreign = cel::value_type::array(cel::value_type::record(
+        "callbacks",
+        std::array{cel::record_field{"stored", cel::value_type::tuple(std::array{foreign})}}));
+    CHECK(nested.same_shape(nested_foreign));
+    CHECK_FALSE(nested.compatible_with(nested_foreign));
+    CHECK_FALSE(nested_foreign.compatible_with(nested));
+    CHECK(live_test_owners == 0);
+}
+
 /// Catches accepting incomplete opaque operations or mutating shared capability metadata.
 TEST_CASE("private callable ownership installation preserves shape and validates operation pairs") {
     const auto signature = cel::value_type::callable({}, cel::value_type::leaf<double>());

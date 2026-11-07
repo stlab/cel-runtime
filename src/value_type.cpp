@@ -142,7 +142,7 @@ ownership_slot type_access::resource(const value_type& type, std::size_t ordinal
 }
 
 void require_compatible(const value_type& expected, const value_type& actual) {
-    if (!expected.same_shape(actual) || !type_access::compatible_operations(expected, actual))
+    if (!expected.compatible_with(actual))
         throw std::invalid_argument("incompatible value shape or opaque ownership operations");
 }
 
@@ -306,6 +306,10 @@ value_type value_type::callable(std::span<const value_type> parameters, value_ty
 
 bool value_type::same_shape(const value_type& other) const {
     return detail::type_access::compare_plans(*this, other, true);
+}
+
+bool value_type::compatible_with(const value_type& other) const {
+    return same_shape(other) && detail::type_access::compatible_operations(*this, other);
 }
 
 type_kind value_type::kind() const noexcept { return _plan->kind; }

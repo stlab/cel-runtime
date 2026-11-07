@@ -44,6 +44,17 @@ The parser integration must preserve these runtime requirements:
    iteration rule.
 7. Treat external body costs as unknown unless the body is directly known;
    reserve additional caller capacity before entry.
+8. Inspect `operand_types(arity)` before selecting an operation overload.
+   Its borrowed suffix contains local logical operands in older-first order,
+   including zero-byte unit values, and excludes ambient origins. Zero arity
+   and underflow return empty views. Inspection does not allocate or emit code.
+   Mutation, move, or destruction invalidates the view; copied descriptors
+   retain their immutable metadata independently.
+9. Use `value_type::compatible_with` for complete descriptor matching.
+   It checks semantic shape before stored opaque ownership operations,
+   preserves shared-DAG comparison costs, and propagates allocation failures.
+   `same_shape` remains a semantic comparison. Compatibility alone does not
+   prove installed ownership or initialized borrowed canonical data.
 
 The runtime does not implement registry lookup, temporary/persistent scope
 ordering, registered built-in overloads, lexical adapters, grammar, or source

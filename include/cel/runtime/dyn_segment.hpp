@@ -252,6 +252,16 @@ public:
     /// Returns the retained ambient origin.
     /// Example: `builder.origin() == stack_origin{}`.
     stack_origin origin() const noexcept { return _origin; }
+    /// Borrows the requested local logical operand suffix in older-first order.
+    /// Returns an empty view for zero arity or underflow; ambient origins are not operands.
+    /// Does not allocate, mutate construction, finish code, or invoke callbacks.
+    /// Mutation, move, or destruction of this builder invalidates the view.
+    /// Copying a descriptor from the view retains its immutable metadata independently.
+    /// Example: `auto inputs = builder.operand_types(2); if (inputs.size() != 2) return;`.
+    std::span<const value_type> operand_types(std::size_t arity) const noexcept {
+        if (arity > _stack.size()) return {};
+        return std::span<const value_type>(_stack).last(arity);
+    }
     /// Returns the current absolute logical cursor and live-slot depth.
     /// Throws overflow_error if ambient plus local depth overflows.
     /// Example: `auto ambient = builder.snapshot();`.
