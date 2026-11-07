@@ -26,6 +26,16 @@ void destroy_payload(const value_type& type, std::byte* data) noexcept;
 /// Bridges trusted owning wrappers to canonical raw representations.
 /// Does not permit byte-relocation of the public wrapper itself.
 struct value_access {
+    /// Transfers canonical ownership into a caller-provided uninitialized extent.
+    /// Precondition: destination is aligned, disjoint, and large enough for owner.type().
+    /// Leaves owner unit and does not destroy the transferred payload.
+    /// Complexity: O(outer canonical bytes) time; no allocation.
+    static void release_to(value& owner, std::byte* destination) noexcept;
+    /// Acquires outer storage and transfers a canonical owner without cloning its children.
+    /// Precondition: data contains one valid canonical owner of type.
+    /// Success retires source ownership without destroying it; failure preserves source.
+    /// Complexity: O(outer canonical bytes) time and space.
+    static value take(const value_type& type, const std::byte* data);
     /// Borrows initialized canonical bytes until the owner changes or dies.
     static const std::byte* data(const value& owner) noexcept;
     /// Copies initialized canonical bytes into a new independent public owner.

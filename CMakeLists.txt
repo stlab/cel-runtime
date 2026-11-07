@@ -21,15 +21,19 @@ include(CTest)
 
 # Setup library
 cpp_library_setup(
-    DESCRIPTION "Owned values and checked canonical type layouts for CEL evaluation"
+    DESCRIPTION "Owned values, canonical layouts, and explicit raw execution for CEL"
     NAMESPACE cel
     REQUIRES_CPP_VERSION 20
-    HEADERS runtime/layout.hpp runtime/value_type.hpp runtime/value.hpp
-    SOURCES storage.cpp value_type.cpp value.cpp
-    TESTS storage_test.cpp value_test.cpp resource_test.cpp nontrivial_leaf_fail.cpp
+    HEADERS runtime/layout.hpp runtime/value_type.hpp runtime/value.hpp runtime/raw_stack.hpp runtime/raw_segment.hpp
+    SOURCES storage.cpp value_type.cpp value.cpp raw_stack.cpp raw_segment.cpp
+    TESTS storage_test.cpp value_test.cpp resource_test.cpp raw_execution_test.cpp nontrivial_leaf_fail.cpp
 )
 if(TARGET storage_test)
     target_include_directories(storage_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
+if(TARGET raw_execution_test)
+    target_include_directories(raw_execution_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    set_tests_properties(raw_execution_test PROPERTIES TIMEOUT 30)
 endif()
 if(TARGET value_test)
     target_include_directories(value_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")

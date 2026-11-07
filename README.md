@@ -1,9 +1,10 @@
 # CEL runtime
 
 This C++20 library gives runtime clients complete type descriptors and
-independently owned values with checked canonical byte layouts.
-Aligned storage is private. The library does not include stack execution,
-callable bodies, segments, or a parser.
+independently owned values with checked canonical byte layouts, reusable
+operand stacks, and stored operation sequences.
+Aligned storage is private. The library does not include checked compilation,
+callable bodies, control-flow emission, or a parser.
 
 ## Construct and copy values
 
@@ -71,6 +72,63 @@ carrier bytes.
 
 Floating-point extraction preserves IEEE binary64 values, including NaN.
 The library does not expose value equality or ordering.
+
+## Execute stored operations
+
+Build a trusted operation sequence and run it in an explicit caller-owned frame:
+
+```cpp
+#include <cel/runtime/raw_segment.hpp>
+
+cel::raw_segment program;
+program.push_op0<double>([](cel::frame&) { return 12.0; });
+program.push_op0<double>([](cel::frame&) { return 3.0; });
+program.push_op2<double, double, double>(
+    [](cel::frame&, double a, double b) { return a / b; });
+
+cel::raw_stack stack;
+stack.reserve(1024, 256);
+{
+    cel::frame scope(stack);
+    program.execute(scope);
+    const double result = scope.pop<double>(); // 4.0
+}
+```
+
+`push_op<R, Args...>` supports arbitrary arity; `push_op0` through `push_op3`
+are wrappers. Callbacks receive the explicit frame followed by operands in
+source order. They run through const typed captures, which the sequence owns
+in a stable standard arena. Capture destructors run before arena release.
+`R = void` produces no operand; `std::tuple<>` produces source unit.
+Referenced external callback state remains borrowed and is not made thread-safe.
+
+The raw program requires matching complete operand signatures and ownership
+operations above its frame checkpoint. A later checked builder can establish
+those invariants once. Safe stack/frame `push` and `pop` reject invalid
+accesses; concrete `pop` also checks the complete type, not merely its byte size.
+Only the innermost lexical frame mutates the stack. Direct stack mutation and
+movement while a frame is active throw `std::logic_error`. The stack and
+argument sources outlive all frames that borrow them.
+
+Frame destruction and execution failure retire only the acquired suffix,
+preserving the checkpoint prefix. A nested frame uses the same stack with its
+own checkpoint and explicitly borrowed arguments/context; no thread-local
+evaluation state exists. `arguments()` borrows public input owners, while
+`canonical_arguments()` borrows pre-bound descriptor/pointer slots. Construct
+nested frames with the input view used by their caller. `push_argument(index)`
+clones only an emitted read, directly into canonical stack bytes; unused inputs
+are not copied. Canonical input bytes and descriptors must remain live and must
+not alias mutable evaluation storage.
+
+`reserve(bytes, alignment)` reserves payload storage and at least `bytes` active
+slots. Use `reserve_depth(count)` for additional zero-byte unit operands.
+Preparation initializes scalar metadata and owns captures; reserved scalar
+execution and frame cleanup do not allocate. Packed composite construction or
+cloning can allocate owned element storage. `push_take` and `pop_value`
+transfer canonical ownership across public value boundaries without
+byte-relocating the facades; public result extraction acquires outer storage.
+The private checked-builder bridge can instead transfer results directly into
+pre-reserved canonical result bytes without allocation or descriptor comparison.
 
 ## Use byte layouts
 

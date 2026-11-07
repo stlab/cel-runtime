@@ -24,6 +24,10 @@ static_assert(std::is_trivially_copyable_v<opaque_ownership>);
 /// Installs immutable callable ownership metadata without changing semantic signature identity.
 /// These operations do not implement callable execution or concrete closure bodies.
 struct type_access {
+    /// Reports shared complete immutable metadata identity without traversing the shape.
+    static bool same_plan(const value_type& a, const value_type& b) noexcept {
+        return a._plan == b._plan;
+    }
     /// Copies one metadata plan and installs a complete ownership pair.
     /// Throws std::invalid_argument for non-callables or missing operations.
     /// Caller supplies trusted operations satisfying opaque_ownership's contract.

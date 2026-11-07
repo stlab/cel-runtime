@@ -274,6 +274,20 @@ std::size_t outer_count(const value_type& type) {
 const std::byte* value_access::data(const value& owner) noexcept {
     return owner._payload ? owner._payload->bytes.data() : nullptr;
 }
+void value_access::release_to(value& owner, std::byte* destination) noexcept {
+    if (!owner._payload) return;
+    const auto size = owner._payload->type.byte_layout().size;
+    if (size != 0) std::memcpy(destination, owner._payload->bytes.data(), size);
+    owner._payload->initialized = 0;
+    owner._payload.reset();
+}
+value value_access::take(const value_type& type, const std::byte* data) {
+    auto result = std::make_unique<owned_payload>(type);
+    const auto size = type.byte_layout().size;
+    if (size != 0) std::memcpy(result->bytes.data(), data, size);
+    result->initialized = outer_count(type);
+    return value(std::move(result));
+}
 value value_access::copy(const value_type& type, const std::byte* data) {
     auto result = std::make_unique<owned_payload>(type);
     clone_payload(type, data, result->bytes.data());
