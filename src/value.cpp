@@ -297,6 +297,55 @@ value value_access::copy(const value_type& type, const std::byte* data) {
 value value_access::take_array(value_type element, std::span<value> children) {
     return value::array_owned(std::move(element), children);
 }
+array_builder::array_builder(const value_type& element, std::size_t count) :
+    _owner(std::make_unique<array_owner>(element, count)) {}
+array_builder::~array_builder() {
+    if (!_owner) return;
+    const auto stride = _owner->element.byte_layout().size;
+    for (std::size_t i = _owner->count - _suffix; i != _owner->count; ++i)
+        destroy_payload(_owner->element, byte_at(_owner->bytes.data(), i * stride));
+}
+std::byte* array_builder::destination() noexcept {
+    assert(_owner && _suffix < _owner->count);
+    return byte_at(_owner->bytes.data(),
+                   (_owner->count - _suffix - 1) * _owner->element.byte_layout().size);
+}
+void array_builder::initialized() noexcept {
+    assert(_owner && _suffix < _owner->count);
+    ++_suffix;
+}
+void array_builder::release_to(std::byte* destination) noexcept {
+    assert(_owner && _suffix == _owner->count);
+    _owner->initialized = _owner->count;
+    write_carrier(destination, _owner.release());
+    _suffix = 0;
+}
+std::size_t value_access::array_size(const std::byte* data) noexcept {
+    return read_array(data).owner->count;
+}
+void value_access::project(const value_type& type,
+                           std::byte* source,
+                           std::size_t index,
+                           std::byte* destination) noexcept {
+    if (type.kind() == type_kind::array) {
+        auto* owner = read_array(source).owner;
+        const auto stride = owner->element.byte_layout().size;
+        if (stride != 0)
+            std::memcpy(destination, byte_at(owner->bytes.data(), index * stride), stride);
+        // The selected element transfers; only siblings retain ownership to retire.
+        for (std::size_t i = 0; i != owner->count; ++i)
+            if (i != index)
+                destroy_payload(owner->element, byte_at(owner->bytes.data(), i * stride));
+        owner->initialized = 0;
+        delete owner;
+    } else {
+        const auto fields = type.fields();
+        const auto size = fields[index].byte_layout().size;
+        if (size != 0) std::memcpy(destination, byte_at(source, type.offsets()[index]), size);
+        for (std::size_t i = 0; i != fields.size(); ++i)
+            if (i != index) destroy_payload(fields[i], byte_at(source, type.offsets()[i]));
+    }
+}
 
 /// Finds a named source-order field or reports malformed access.
 /// Throws std::invalid_argument for a non-record or missing name.

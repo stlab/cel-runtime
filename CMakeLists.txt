@@ -24,9 +24,9 @@ cpp_library_setup(
     DESCRIPTION "Owned values, canonical layouts, and explicit raw execution for CEL"
     NAMESPACE cel
     REQUIRES_CPP_VERSION 20
-    HEADERS runtime/layout.hpp runtime/value_type.hpp runtime/value.hpp runtime/raw_stack.hpp runtime/raw_segment.hpp runtime/dyn_segment.hpp runtime/segment.hpp
-    SOURCES storage.cpp value_type.cpp value.cpp raw_stack.cpp raw_segment.cpp dyn_segment.cpp
-    TESTS storage_test.cpp value_test.cpp resource_test.cpp raw_execution_test.cpp segment_test.cpp nontrivial_leaf_fail.cpp typed_operand_fail.cpp static_operand_fail.cpp overloaded_operand_fail.cpp generic_conversion_fail.cpp nondeduced_generic_fail.cpp
+    HEADERS runtime/layout.hpp runtime/value_type.hpp runtime/value.hpp runtime/raw_stack.hpp runtime/raw_segment.hpp runtime/dyn_segment.hpp runtime/segment.hpp runtime/callable.hpp
+    SOURCES storage.cpp value_type.cpp value.cpp raw_stack.cpp raw_segment.cpp dyn_segment.cpp callable.cpp
+    TESTS storage_test.cpp value_test.cpp resource_test.cpp raw_execution_test.cpp segment_test.cpp composite_execution_test.cpp callable_test.cpp nontrivial_leaf_fail.cpp typed_operand_fail.cpp static_operand_fail.cpp overloaded_operand_fail.cpp generic_conversion_fail.cpp nondeduced_generic_fail.cpp
 )
 if(TARGET storage_test)
     target_include_directories(storage_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -45,4 +45,11 @@ endif()
 if(TARGET segment_test)
     target_include_directories(segment_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     set_tests_properties(segment_test PROPERTIES TIMEOUT 30)
+endif()
+if(TARGET composite_execution_test)
+    target_include_directories(composite_execution_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    set_tests_properties(composite_execution_test PROPERTIES TIMEOUT 30)
+endif()
+if(TARGET callable_test)
+    set_tests_properties(callable_test PROPERTIES TIMEOUT 30)
 endif()

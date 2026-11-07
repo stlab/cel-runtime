@@ -5,6 +5,36 @@
 #include <cel/runtime/value.hpp>
 
 namespace cel::detail {
+struct array_owner;
+/// Guards a canonical packed array whose elements initialize in reverse source order.
+/// Reuses the existing array owner and destruction operations; no erased move hook exists.
+class array_builder {
+    std::unique_ptr<array_owner> _owner;
+    std::size_t _suffix = 0;
+
+public:
+    /// Allocates all packed element storage before ownership transfer.
+    /// Throws overflow_error for count times canonical stride overflow.
+    /// Complexity: O(element byte extent) time and packed storage.
+    array_builder(const value_type& element, std::size_t count);
+    /// Retires the initialized suffix with existing canonical ownership operations.
+    /// Complexity: O(initialized elements + visited ownership paths); no allocation.
+    ~array_builder();
+    /// Disallows duplicated array ownership.
+    array_builder(const array_builder&) = delete;
+    /// Disallows duplicated assignment.
+    array_builder& operator=(const array_builder&) = delete;
+    /// Borrows the next uninitialized reverse-source element destination.
+    /// Precondition: at least one uninitialized element remains.
+    std::byte* destination() noexcept;
+    /// Records complete initialization of the next reverse-source element.
+    /// Precondition: destination() now contains exactly one complete owned element.
+    void initialized() noexcept;
+    /// Transfers a fully initialized canonical array carrier into external storage.
+    /// Precondition: all elements are initialized; destination has array-carrier layout.
+    /// Source ownership retires without cloning.
+    void release_to(std::byte* destination) noexcept;
+};
 
 /// Clones one initialized raw value into uninitialized canonical storage.
 /// Precondition: destination is an uninitialized, suitably aligned extent of type.
@@ -49,6 +79,17 @@ struct value_access {
     /// Throws std::overflow_error for canonical extent overflow before consuming sources.
     /// Complexity: O(canonical element bytes + compared shape size) time and packed outer storage.
     static value take_array(value_type element, std::span<value> children);
+    /// Returns a packed array's logical length without acquiring ownership.
+    /// Precondition: data contains a complete initialized array carrier.
+    static std::size_t array_size(const std::byte* data) noexcept;
+    /// Transfers the selected aggregate/array child and retires every sibling and outer owner.
+    /// Precondition: index is in bounds; destination is disjoint aligned uninitialized storage.
+    /// Source ownership is retired on return.
+    /// Complexity: O(sibling count + visited ownership paths + selected outer bytes).
+    static void project(const value_type& type,
+                        std::byte* source,
+                        std::size_t index,
+                        std::byte* destination) noexcept;
 };
 
 } // namespace cel::detail

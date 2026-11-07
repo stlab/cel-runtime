@@ -23,6 +23,29 @@ struct stack_state {
 /// Supplies trusted canonical access for a later signature-checked instruction builder.
 /// Operands never borrow mutable ownership; all pointers expire on stack mutation.
 struct frame_access {
+    /// Borrows the caller-owned stack for nested execution after canonical phases end.
+    static raw_stack& stack(frame& scope) {
+        scope.require_active();
+        return *scope._stack;
+    }
+    /// Allocates final stack extent/slot capacity before transferring a consumed suffix.
+    /// Throws out_of_range for missing operands and overflow_error for extent/depth overflow.
+    /// Preserves every owner and cursor on failure; may retain increased capacity.
+    /// Complexity: O(retained bytes/slots) on growth; no allocation on reserved storage.
+    static void reserve_result(frame& scope, const value_type& result, std::size_t consumed) {
+        scope.require_active();
+        auto& data = scope._stack->state();
+        if (consumed > data.slots.size() - scope._checkpoint)
+            throw std::out_of_range("transfer operand underflow");
+        raw_stack::phase_guard phase(*scope._stack);
+        const auto remaining = data.slots.size() - consumed;
+        const auto cursor = consumed == 0 ? data.cursor : data.slots[remaining].previous;
+        const auto bytes = result.byte_layout();
+        const auto extent = checked_add(align_offset(cursor, bytes.alignment), bytes.size);
+        data.slots.reserve(checked_add(remaining, 1));
+        data.bytes.reserve(extent, bytes.alignment);
+        if (extent > data.bytes.size()) data.bytes.resize(extent);
+    }
     /// Borrows operands only while a scoped canonical acquisition holds the phase gate.
     struct operand_view {
         frame& scope; ///< Borrows the frame for the enclosing acquisition call only.

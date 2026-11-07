@@ -31,6 +31,8 @@ struct concrete_adapter;
 } // namespace detail
 
 /// Owns a complete runtime value; copies own independent mutable payloads.
+/// Installed callables are explicit reference-semantic code handles: copies share frozen code,
+/// callback references, and the carrier's recursive-entry guard, not mutable aggregate payloads.
 /// Moved-from and default values are source unit. Internal descriptors may be shared.
 /// Opaque leaves own their bytes, not objects reachable through client pointers.
 /// Public wrappers must never be byte-relocated; private carriers transfer one owner.
@@ -92,8 +94,9 @@ public:
     /// Complexity: O(visited canonical ownership paths, array nodes, and released metadata)
     /// time and O(1) auxiliary space; destruction does not recurse with nesting depth.
     ~value();
-    /// Copies all mutable payloads independently; shares only immutable metadata.
-    /// Complexity: O(canonical payload bytes + visited ownership paths) time and owned space.
+    /// Copies mutable aggregate payloads independently; callable code handles retain reference
+    /// semantics. Complexity: O(canonical payload bytes + visited ownership paths) time and owned
+    /// space.
     value(const value& other);
     /// Transfers ownership and leaves other as source unit.
     value(value&& other) noexcept;

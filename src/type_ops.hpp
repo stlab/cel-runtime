@@ -12,7 +12,8 @@ struct ownership_slot {
     std::size_t offset;     ///< Gives its canonical byte offset from the containing value.
 };
 /// Supplies a complete ownership pair for an opaque byte-transferable callable carrier.
-/// clone creates independent mutable ownership; destroy never allocates or throws.
+/// clone creates independent carrier ownership; explicit reference-semantic code may be shared.
+/// Mutable aggregate payloads are never shared. destroy never allocates or throws.
 /// A throwing clone must release its partial construction and leave destination uninitialized.
 /// Both functions operate on the signature's canonical extent; no operand move callback exists.
 struct opaque_ownership {

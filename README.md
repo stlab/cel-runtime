@@ -2,9 +2,9 @@
 
 This C++20 library gives runtime clients complete type descriptors and
 independently owned values with checked canonical byte layouts, reusable
-operand stacks, checked builders, and frozen prepared operation sequences.
-Aligned storage is private. The library does not include callable bodies,
-control-flow emission, operation lookup, or a parser.
+operand stacks, structural and lazy checked builders, and first-class callable
+bodies. Aligned storage is private. The library does not include operation
+lookup or a parser.
 
 ## Construct and copy values
 
@@ -52,7 +52,8 @@ complete nested shapes, record identities/names, range forms, and canonical
 layouts. Equal layouts alone never authorize concrete extraction.
 Callable parameters contain bool/double leaves and their composites; results
 can have any valid shape, including client leaves and callable signatures.
-Descriptors retain signatures without constructing callable bodies.
+Signature descriptors alone do not install callable ownership or bodies;
+`callable` installs the complete carrier operations when it binds code.
 `owns_values()` reports complete type-level clone/destruction capabilities;
 an empty array can still be owned when its element capability is deferred.
 
@@ -212,6 +213,118 @@ and checks both extent and depth sums for overflow. Pass these totals to
 Construction checks intermediate layout arithmetic before publishing opcodes.
 Composite payload allocations, concrete callback temporaries, result buffers,
 and arbitrary callback or nested external stack work are not statically inferred.
+Structural branches contribute their maximum selected demand. Direct
+`push_closure`/`invoke_closure` pairs also account for the known callee body;
+callable signatures obtained through values or projections cannot describe
+external body costs.
+
+## Emit structural values and lazy bodies
+
+Use `snapshot()` before source expressions to retain their ambient byte cursor
+and live-slot depth. Packing consumes the source-ordered suffix and transfers
+canonical ownership, without cloning children:
+
+```cpp
+cel::dyn_segment builder;
+const auto ambient = builder.snapshot();
+builder.just(cel::value::from(std::vector{2.0, 3.0}));
+builder.just(cel::value::from(true));
+builder.make_tuple(2, ambient);
+builder.project_tuple(0);
+builder.just(cel::value::from(1.0));
+builder.index_array();
+auto program = std::move(builder).finish();
+cel::raw_stack stack;
+const auto result = program.execute(stack, {}).as<double>(); // 3.0
+```
+
+`make_array(count, element_type, ambient)` supports zero-byte elements and
+empty typed arrays. `make_record(schema, permutation, ambient)` takes a
+source-position to schema-position bijection; it changes storage positions,
+not expression evaluation order. The overload without a permutation expects
+schema-ordered operands. Wrong complete types, counts, permutations, and
+origins throw `std::invalid_argument` before opcode publication.
+`project_tuple`, `project_record`, and `index_array` transfer the selected
+owner and retire siblings. Index operands are f64; nonfinite, negative,
+fractional, unrepresentable, and out-of-bounds indices throw
+`std::out_of_range` before unsafe conversion. `make_range(kind)` retains all
+six complete f64 range forms and source endpoint order; full ranges consume
+no endpoints. Ranges do not specify floating iteration.
+
+Construct branch fragments at the origin below the condition:
+
+```cpp
+cel::dyn_segment builder;
+builder.just(cel::value::from(true));
+cel::dyn_segment yes(builder.before_top()), no(builder.before_top());
+yes.just(cel::value::from(2.0));
+no.just(cel::value::from(3.0));
+builder.if_else(std::move(yes), std::move(no));
+auto program = std::move(builder).finish();
+```
+
+Both fragments must produce exactly one complete, ownership-compatible
+result. Only the selected fragment executes. All emitted reads from both
+fragments participate in the parent's external preflight, including reads in
+unselected bodies. `logical_and(rhs)` and `logical_or(rhs)` use the same
+origin/read rules and short-circuit bool operands. `finish()` retains dependent
+origins; `execute`, preparation, and callable construction reject a nonzero
+byte **or slot** origin. A zero-byte prefix does not make a dependent body
+independent.
+
+Structural execution allocates canonical outer staging, and arrays allocate
+one packed owner and element extent. It never relocates native vectors/tuples
+or allocates one public owner per scalar. Required storage is acquired before
+the first child transfer; initialized guards release partial ownership on
+failure. Final stack publication transfers one owner without allocation.
+
+## Receive and invoke callables
+
+Include the installed public callable header to bind an independent body and
+its full explicit parameter declarations:
+
+```cpp
+#include <cel/runtime/callable.hpp>
+
+cel::dyn_segment body;
+body.push_argument(0, cel::value_type::leaf<double>());
+body.op1<double, double>([](double n) { return n + 1.0; });
+cel::callable fn(std::move(body).finish(),
+                 std::array{cel::value_type::leaf<double>()});
+cel::raw_stack stack;
+auto received = cel::callable::from_value(fn.to_value());
+const auto result =
+    received.call(stack, std::array{cel::value::from(4.0)}).as<double>(); // 5.0
+```
+
+Unused declared parameters remain in the callable signature. Checked calls
+validate arity and every parameter's complete shape and ownership before body
+effects, unlike ordinary compiled programs' read-subset validation. Parameters
+admit bool/f64 and their composites. Results admit every complete owned type,
+including client leaves, nested aggregates, and installed callable carriers.
+`to_value()` and `from_value()` let clients receive and invoke closure results
+without private headers.
+
+Callable copies are explicit reference-semantic handles: they share frozen
+code, explicit callback references, and a recursive-entry guard. They do not
+claim independent copies of mutable callback state. No implicit lexical
+environment exists. Exclusive access is required; recursive calls through the
+same carrier or its aliases throw `std::logic_error`. Distinct carriers can
+nest. Argument tables, temporary owners, and results belong to each invocation.
+
+`push_closure(body, declarations)` emits a carrier. `invoke_closure(arity)`
+expects the callee below its source-ordered arguments, validates the complete
+signature during construction, and transfers all consumed owners into one
+stable guarded canonical frame before user code. Nested execution can grow the
+main stack without invalidating those argument views or an outer owning prefix.
+Success transfers one independent result; exceptions retire all staged owners
+and preserve their original context and the caller prefix.
+
+Public checked calls allocate an argument-view table and result outer storage.
+Dynamic invocation also allocates packed staging, a pointer table, and result
+storage; scalar arguments have no individual public boxes. Warmed ordinary and
+lazy scalar prepared dispatch remains allocation-free on reserved storage.
+These staging costs are separate from scalar opcode dispatch costs.
 
 All program and prepared handles are move-only. Prepared factories share a
 deliberately reference-semantic frozen engine, retaining captures and metadata

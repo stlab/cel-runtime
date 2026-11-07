@@ -4,9 +4,22 @@
 #include <cel/runtime/raw_segment.hpp>
 #include <concepts>
 #include <new>
+#include <optional>
 #include <vector>
 
 namespace cel {
+/// Identifies a dependent fragment's ambient byte cursor and live-slot depth.
+/// Both coordinates must match; zero-byte prefixes still contribute live slots.
+/// Example: `dyn_segment rhs(parent.before_top());`.
+struct stack_origin {
+    std::size_t bytes = 0; ///< Gives the ambient canonical cursor.
+    std::size_t depth = 0; ///< Gives the ambient live-slot count.
+};
+/// Compares both ambient coordinates exactly.
+/// Example: `stack_origin{} == stack_origin{0, 0}`.
+inline bool operator==(const stack_origin& left, const stack_origin& right) noexcept {
+    return left.bytes == right.bytes && left.depth == right.depth;
+}
 class compiled_segment;
 class prepared_raw_segment;
 template <class R, class... Args>
@@ -194,6 +207,15 @@ class dyn_segment {
     std::vector<detail::argument_read> _reads;
     std::vector<std::size_t> _end_cursors; ///< Mirrors canonical cursor ends in _stack order.
     stack_requirements _requirements;      ///< Retains committed intermediate storage peaks.
+    stack_origin _origin; ///< Retains dependent origin independently of logical local operands.
+    std::vector<std::optional<stack_requirements>> _known_calls; ///< Tracks direct frozen callees.
+    /// Emits a fixed aggregate using complete source-order witnesses and canonical destinations.
+    /// Throws invalid_argument for wrong origin, shape, or permutation before publication.
+    /// Complexity: O(fields + compared metadata) construction and canonical staging space.
+    void pack(value_type type, std::span<const std::size_t> permutation, stack_origin ambient);
+    /// Emits consuming fixed aggregate projection after validating its complete descriptor.
+    /// Complexity: O(compared metadata) construction and O(siblings + payload work) execution.
+    void project(std::size_t index, type_kind category);
     /// Validates the ordered suffix and reserves metadata before opcode publication.
     /// Throws invalid_argument for underflow, incompatible operands, or absent ownership.
     /// Throws std::overflow_error for canonical frame extent or depth overflow.
@@ -213,6 +235,11 @@ public:
     /// Creates an empty checked stack.
     /// Example: `dyn_segment builder;`.
     dyn_segment() = default;
+    /// Creates an empty dependent fragment at the supplied ambient origin.
+    /// Dependent fragments cannot execute or prepare independently, even after static ascription.
+    /// Throws overflow_error when subsequent emission cannot represent absolute cursor/depth.
+    /// Example: `dyn_segment branch(parent.before_top());`.
+    explicit dyn_segment(stack_origin origin) : _origin(origin) {}
     /// Disallows copying mutable construction ownership.
     dyn_segment(const dyn_segment&) = delete;
     /// Disallows copied assignment.
@@ -222,6 +249,97 @@ public:
     /// Transfers construction ownership, releasing prior captures and metadata.
     /// Complexity: O(old captures and metadata).
     dyn_segment& operator=(dyn_segment&&) noexcept = default;
+    /// Returns the retained ambient origin.
+    /// Example: `builder.origin() == stack_origin{}`.
+    stack_origin origin() const noexcept { return _origin; }
+    /// Returns the current absolute logical cursor and live-slot depth.
+    /// Throws overflow_error if ambient plus local depth overflows.
+    /// Example: `auto ambient = builder.snapshot();`.
+    stack_origin snapshot() const;
+    /// Returns the origin immediately below the top local operand.
+    /// Throws invalid_argument if no local operand exists.
+    /// Example: `dyn_segment then_body(builder.before_top());`.
+    stack_origin before_top() const;
+    /// Packs count source-ordered operands into an exact owning tuple at ambient.
+    /// Throws invalid_argument for missing operands or wrong byte/depth origin before effects.
+    /// Throws overflow_error for canonical layout/accounting overflow.
+    /// Complexity: O(count + compared metadata) construction; O(count + outer bytes) execution.
+    /// Example: `builder.make_tuple(2, stack_origin{});`.
+    void make_tuple(std::size_t count, stack_origin ambient);
+    /// Packs exact element operands into one owning packed array, including typed empty arrays.
+    /// Throws invalid_argument for count, complete element mismatch, ownership, or ambient origin.
+    /// Throws overflow_error for extent/accounting overflow.
+    /// Complexity: O(count + compared metadata) construction; O(count + element bytes) execution.
+    /// Example: `builder.make_array(0, value_type::leaf<double>(), {});`.
+    void make_array(std::size_t count, value_type element, stack_origin ambient);
+    /// Packs record operands already ordered by the canonical schema.
+    /// Follows the source-order overload's ownership, validation, and allocation contracts.
+    /// Complexity: O(fields + compared metadata).
+    /// Example: `builder.make_record(schema, {});`.
+    void make_record(value_type record, stack_origin ambient);
+    /// Packs source-position to schema-position fields without reordering expression execution.
+    /// Throws invalid_argument for non-record, wrong origin/types, or incomplete/nonbijective map.
+    /// Throws overflow_error for extent/accounting overflow. Validation precedes publication.
+    /// Complexity: O(fields + compared metadata) construction; O(fields + outer bytes) execution.
+    /// Example: `builder.make_record(schema, std::array<std::size_t, 2>{1, 0}, {});`.
+    void make_record(value_type record,
+                     std::span<const std::size_t> permutation,
+                     stack_origin ambient);
+    /// Transfers one tuple field while retiring the consumed tuple and siblings, without clones.
+    /// Throws invalid_argument for a wrong operand category or index before publication.
+    /// Complexity: O(compared metadata) construction; O(siblings + ownership work) execution.
+    /// Example: `builder.project_tuple(0);`.
+    void project_tuple(std::size_t index);
+    /// Transfers the named record field and retires the consumed owner and siblings.
+    /// Throws invalid_argument for non-record or missing field before publication.
+    /// Complexity: O(names + compared metadata) construction; O(siblings + ownership work)
+    /// execution. Example: `builder.project_record("enabled");`.
+    void project_record(std::string_view name);
+    /// Consumes an array followed by an f64 index and transfers only the selected element.
+    /// Throws invalid_argument for operand shape before publication; execution throws out_of_range
+    /// for nonfinite, negative, fractional, unrepresentable, or out-of-bounds indices.
+    /// Complexity: O(compared metadata) construction; O(siblings + ownership work) execution.
+    /// Example: `builder.just(value::from(0.0)); builder.index_array();`.
+    void index_array();
+    /// Packs source-ordered f64 endpoints into the complete specified range; full consumes none.
+    /// Throws invalid_argument for kind or wrong operands; overflow_error for canonical accounting.
+    /// No floating iteration semantics are supplied.
+    /// Complexity: O(compared endpoint metadata) construction and O(1) execution.
+    /// Example: `builder.make_range(range_kind::range_full);`.
+    void make_range(range_kind kind);
+    /// Consumes bool and executes only one exact one-result dependent fragment.
+    /// Bodies must originate immediately below the condition, with no local preloaded operands.
+    /// All reads in both bodies are registered and preflighted before parent execution effects.
+    /// Throws invalid_argument for condition, origin, result/read mismatch before publication.
+    /// Throws overflow_error for accounting. Reservations use maximum selected-body demand.
+    /// Complexity: O(body read metadata + compared plans) construction; O(selected body) execution.
+    /// Example: `builder.if_else(std::move(yes), std::move(no));`.
+    void if_else(dyn_segment then_body, dyn_segment else_body);
+    /// Executes bool rhs only if the bool left operand is true.
+    /// Follows if_else's origins, shared-read preflight, exceptions, and maximum-demand contracts.
+    /// Complexity: O(rhs read metadata) construction; O(selected rhs work) execution.
+    /// Example: `builder.logical_and(std::move(rhs));`.
+    void logical_and(dyn_segment rhs);
+    /// Executes bool rhs only if the bool left operand is false.
+    /// Follows if_else's origins, shared-read preflight, exceptions, and maximum-demand contracts.
+    /// Complexity: O(rhs read metadata) construction; O(selected rhs work) execution.
+    /// Example: `builder.logical_or(std::move(rhs));`.
+    void logical_or(dyn_segment rhs);
+    /// Emits an installed callable retaining explicit parameters and independent frozen code.
+    /// Throws invalid_argument for dependent body, invalid parameters, or undeclared/wrong reads.
+    /// Throws overflow_error for canonical accounting. Results admit all complete owning types.
+    /// Complexity: O(parameters + compared metadata) construction; O(1) carrier clone execution.
+    /// Example: `builder.push_closure(std::move(body).finish(), parameters);`.
+    void push_closure(compiled_segment body, std::span<const value_type> parameters);
+    /// Consumes an installed callee followed by source-ordered complete declared arguments.
+    /// Binds exact ownership once; stages all owners in one stable canonical frame before user
+    /// code. Throws invalid_argument for arity/signature/carrier mismatch before publication.
+    /// Exceptions retire staged owners and preserve the caller prefix and original exception.
+    /// Known direct callee requirements are included; signature-only external costs are not
+    /// inferred. Complexity: O(arity + compared metadata) construction; O(arguments + callee work)
+    /// execution. Invocation allocates packed outer staging, pointer tables, and result storage,
+    /// not scalar boxes. Example: `builder.invoke_closure(2);`.
+    void invoke_closure(std::size_t arity);
     /// Emits an owned clone of a borrowed positional input.
     /// Repeated declarations must have identical complete shapes and ownership plans.
     /// Throws invalid_argument for incompatible repeated declarations or missing clone capability.
@@ -333,19 +451,23 @@ public:
     /// Arbitrary callback/nested costs are not inferred; use for_prefix before reserving.
     /// Example: `auto r = program.requirements().for_prefix(stack.cursor(), stack.depth());`.
     const stack_requirements& requirements() const noexcept;
+    /// Returns the retained ambient origin; nonzero byte or depth origins are dependent.
+    /// Precondition: this handle is live.
+    /// Example: `program.origin() == stack_origin{}`.
+    stack_origin origin() const noexcept;
     /// Borrows emitted read requirements; absent positional inputs are unused.
     /// Precondition: this handle has not been moved from.
     /// Example: `auto reads = program.argument_reads();`.
     std::span<const detail::argument_read> argument_reads() const noexcept;
     /// Validates all actual read witnesses before effects and returns an independent owner.
     /// Extra unused inputs are permitted and are not materialized.
-    /// Throws invalid_argument for missing/incompatible read types or ownership.
+    /// Throws invalid_argument for dependent origin or missing/incompatible read types/ownership.
     /// Callback/acquisition exceptions propagate after nonallocating suffix cleanup.
     /// Complexity: O(read validation + executed instructions + payload work) time and result space.
     /// Example: `auto result = program.execute(stack, inputs);`.
     value execute(raw_stack& stack, std::span<const value> arguments) const;
     /// Binds complete runtime shapes and ownership plans once.
-    /// Throws invalid_argument for undeclared reads, incompatible types, or absent ownership.
+    /// Throws invalid_argument for dependent origin, undeclared reads, types, or absent ownership.
     /// Complexity: O(arguments + distinct compared metadata pairs) time and binding space.
     /// Example: `auto bound = program.prepare_raw(types, program.result_type());`.
     prepared_raw_segment prepare_raw(std::span<const value_type> arguments,
