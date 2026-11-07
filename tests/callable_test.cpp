@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: BSL-1.0
 #include "allocation_probe.hpp"
+#include "type_ops.hpp"
+#include "value_ops.hpp"
 #include <cel/runtime/callable.hpp>
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <array>
@@ -19,6 +21,17 @@ const cel::callable* acquisition_callable = nullptr;
 cel::raw_stack* acquisition_stack = nullptr;
 /// Records observable same-carrier rejection.
 bool acquisition_rejected = false;
+/// Counts foreign ownership operations to detect access before ABI rejection.
+int foreign_clones = 0;
+/// Counts foreign canonical retirement.
+int foreign_destroys = 0;
+/// Copies a foreign opaque carrier without treating its bytes as installed callable code.
+void clone_foreign(const std::byte* source, std::byte* destination) {
+    std::memcpy(destination, source, sizeof(void*));
+    ++foreign_clones;
+}
+/// Retires the resource-free foreign representation without dereferencing it.
+void destroy_foreign(std::byte*) noexcept { ++foreign_destroys; }
 /// Attempts one same-carrier call during invocation-storage acquisition.
 void acquisition_reentry() {
     try {
@@ -228,6 +241,143 @@ TEST_CASE("public checked calls reject same carrier entry throughout invocation 
     CHECK(effects == 1);
     acquisition_callable = nullptr;
     acquisition_stack = nullptr;
+}
+TEST_CASE("dynamic calls reject alias entry before staging acquisition") {
+    int effects = 0;
+    cel::dyn_segment body;
+    body.op0<bool>([&effects] {
+        ++effects;
+        return true;
+    });
+    cel::callable fn(std::move(body).finish(), {});
+    auto alias = fn;
+    cel::raw_stack stack;
+    stack.push(std::vector{9.0});
+    acquisition_callable = &alias;
+    acquisition_stack = &stack;
+    acquisition_rejected = false;
+    cel::dyn_segment outer;
+    outer.just(fn.to_value());
+    outer.op0<void>([] { allocation_hook = acquisition_reentry; });
+    outer.invoke_closure(0);
+    auto program = std::move(outer).finish();
+    auto result = program.execute(stack, {});
+    allocation_hook = nullptr;
+    acquisition_callable = nullptr;
+    acquisition_stack = nullptr;
+    CHECK(acquisition_rejected);
+    CHECK(effects == 1);
+    CHECK(result.as<bool>());
+    CHECK(stack.pop<std::vector<double>>() == std::vector{9.0});
+}
+TEST_CASE("distinct callable carriers nest inside a guarded dynamic invocation") {
+    int inner_effects = 0, outer_effects = 0;
+    cel::raw_stack stack;
+    stack.push(std::vector{6.0});
+    cel::dyn_segment inner;
+    inner.op0<bool>([&inner_effects] {
+        ++inner_effects;
+        return true;
+    });
+    cel::callable inner_fn(std::move(inner).finish(), {});
+    cel::dyn_segment outer;
+    outer.op0<bool>([&] {
+        ++outer_effects;
+        return inner_fn.call(stack, {}).as<bool>();
+    });
+    cel::callable outer_fn(std::move(outer).finish(), {});
+    cel::dyn_segment b;
+    b.just(outer_fn.to_value());
+    b.invoke_closure(0);
+    CHECK(std::move(b).finish().execute(stack, {}).as<bool>());
+    CHECK(inner_effects == 1);
+    CHECK(outer_effects == 1);
+    CHECK(stack.pop<std::vector<double>>() == std::vector{6.0});
+}
+TEST_CASE("call opcode construction allocation failures preserve original callee and arguments") {
+    int body_effects = 0, parent_effects = 0;
+    cel::dyn_segment body;
+    body.push_argument(0, cel::value_type::leaf<double>());
+    body.op1<double, double>([&body_effects](double n) {
+        ++body_effects;
+        return n + 1.0;
+    });
+    cel::callable fn(std::move(body).finish(), std::array{cel::value_type::leaf<double>()});
+    auto parent = [&] {
+        cel::dyn_segment b;
+        b.just(fn.to_value());
+        b.op0<double>([&parent_effects] {
+            ++parent_effects;
+            return 7.0;
+        });
+        return b;
+    };
+    {
+        auto calibrated = parent();
+        allocation_probe probe;
+        calibrated.invoke_closure(1);
+    }
+    const auto allocations = allocation_count;
+    REQUIRE(allocations > 1);
+    REQUIRE(allocations <= static_cast<std::size_t>(std::numeric_limits<int>::max()));
+    for (int budget : {0, static_cast<int>(allocations - 1)}) {
+        parent_effects = 0;
+        body_effects = 0;
+        auto b = parent();
+        const auto original = b.snapshot();
+        bool failed = false;
+        {
+            allocation_failure_probe failure(budget);
+            try {
+                b.invoke_closure(1);
+            } catch (const std::bad_alloc&) {
+                failed = true;
+            }
+        }
+        CHECK(failed);
+        CHECK(b.snapshot() == original);
+        CHECK(parent_effects == 0);
+        CHECK(body_effects == 0);
+        b.make_tuple(2, {});
+        cel::raw_stack stack;
+        auto result = std::move(b).finish().execute(stack, {});
+        CHECK(result.at(1).as<double>() == 7.0);
+        CHECK(parent_effects == 1);
+        CHECK(body_effects == 0);
+        auto original_callee = cel::callable::from_value(result.at(0));
+        CHECK(original_callee.call(stack, std::array{result.at(1)}).as<double>() == 8.0);
+        CHECK(body_effects == 1);
+    }
+}
+TEST_CASE("conversion and dynamic invocation reject foreign same shape ownership before access") {
+    foreign_clones = 0;
+    foreign_destroys = 0;
+    int effects = 0;
+    cel::dyn_segment body;
+    body.just(cel::value::from(true));
+    cel::callable fn(std::move(body).finish(), {});
+    const auto foreign = cel::detail::type_access::install_callable_ownership(
+        fn.type(), {clone_foreign, destroy_foreign});
+    alignas(void*) const std::array<std::byte, sizeof(void*)> null_carrier{};
+    auto impostor = cel::detail::value_access::take(foreign, null_carrier.data());
+    CHECK(impostor.type().same_shape(fn.type()));
+    CHECK_THROWS_AS(cel::callable::from_value(impostor), std::invalid_argument);
+    CHECK(foreign_clones == 0);
+    CHECK(foreign_destroys == 0);
+    cel::dyn_segment b;
+    b.just(std::move(impostor));
+    b.op0<void>([&effects] { ++effects; });
+    const auto original = b.snapshot();
+    CHECK_THROWS_AS(b.invoke_closure(0), std::invalid_argument);
+    CHECK(b.snapshot() == original);
+    CHECK(effects == 0);
+    CHECK(foreign_clones == 0);
+    cel::raw_stack stack;
+    auto result = std::move(b).finish().execute(stack, {});
+    CHECK(result.type().same_shape(fn.type()));
+    CHECK(effects == 1);
+    CHECK(foreign_clones == 1);
+    CHECK_THROWS_AS(cel::callable::from_value(result), std::invalid_argument);
 }
 TEST_CASE("closure construction validates reads parameters and independence") {
     cel::dyn_segment b;

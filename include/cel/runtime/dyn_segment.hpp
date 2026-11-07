@@ -298,6 +298,7 @@ public:
     /// Consumes an array followed by an f64 index and transfers only the selected element.
     /// Throws invalid_argument for operand shape before publication; execution throws out_of_range
     /// for nonfinite, negative, fractional, unrepresentable, or out-of-bounds indices.
+    /// Representability precedes the size_t cast; exact integer bounds precede child access.
     /// Complexity: O(compared metadata) construction; O(siblings + ownership work) execution.
     /// Example: `builder.just(value::from(0.0)); builder.index_array();`.
     void index_array();
@@ -335,6 +336,7 @@ public:
     /// Binds exact ownership once; stages all owners in one stable canonical frame before user
     /// code. Throws invalid_argument for arity/signature/carrier mismatch before publication.
     /// Exceptions retire staged owners and preserve the caller prefix and original exception.
+    /// Same-carrier exclusion starts before staging and remains held through guarded cleanup.
     /// Known direct callee requirements are included; signature-only external costs are not
     /// inferred. Complexity: O(arity + compared metadata) construction; O(arguments + callee work)
     /// execution. Invocation allocates packed outer staging, pointer tables, and result storage,

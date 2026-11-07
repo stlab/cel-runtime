@@ -7,6 +7,7 @@ namespace cel {
 namespace detail {
 struct callable_state;
 struct callable_access;
+class callable_invocation;
 } // namespace detail
 /// Owns a reference-semantic handle to frozen code and its complete declared signature.
 /// Copies share code, explicit callback references, and the same-carrier entry guard.
@@ -17,6 +18,7 @@ struct callable_access;
 class callable {
     std::shared_ptr<detail::callable_state> _state;
     friend struct detail::callable_access;
+    friend class detail::callable_invocation;
 
 public:
     /// Binds independent one-result code and every explicit source-order parameter.

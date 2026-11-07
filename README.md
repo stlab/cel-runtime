@@ -317,6 +317,8 @@ expects the callee below its source-ordered arguments, validates the complete
 signature during construction, and transfers all consumed owners into one
 stable guarded canonical frame before user code. Nested execution can grow the
 main stack without invalidating those argument views or an outer owning prefix.
+Dynamic invocation enters the shared same-carrier guard before allocating
+staging and keeps it through result publication and guarded cleanup.
 Success transfers one independent result; exceptions retire all staged owners
 and preserve their original context and the caller prefix.
 

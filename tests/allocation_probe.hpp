@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSL-1.0
 #ifndef CEL_RUNTIME_TEST_ALLOCATION_PROBE_HPP
 #define CEL_RUNTIME_TEST_ALLOCATION_PROBE_HPP
+#include <cassert>
 #include <cstdlib>
 #include <limits>
 #include <new>
@@ -79,5 +80,20 @@ struct allocation_probe {
     allocation_probe(const allocation_probe&) = delete;
     /// Disallows duplicated assignment.
     allocation_probe& operator=(const allocation_probe&) = delete;
+};
+/// Owns bounded one-shot failure injection and disables it before recovery/assertions.
+struct allocation_failure_probe {
+    /// Fails the selected allocation after budget successful allocations.
+    /// Precondition: budget is nonnegative.
+    explicit allocation_failure_probe(int budget) {
+        assert(budget >= 0);
+        allocation_failure_after = budget;
+    }
+    /// Restores normal allocation on every exit.
+    ~allocation_failure_probe() { allocation_failure_after = -1; }
+    /// Disallows duplicated failure ownership.
+    allocation_failure_probe(const allocation_failure_probe&) = delete;
+    /// Disallows duplicated assignment.
+    allocation_failure_probe& operator=(const allocation_failure_probe&) = delete;
 };
 #endif

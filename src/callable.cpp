@@ -44,28 +44,16 @@ bool callable_access::installed(const value_type& type) noexcept {
     const auto ops = type_access::operations(type);
     return ops.clone == clone_callable && ops.destroy == destroy_callable;
 }
-/// Restores same-carrier availability on success or exception without allocation.
-struct callable_entry {
-    bool& active; ///< Borrows exclusive carrier state.
-    /// Rejects recursive entry before body effects.
-    explicit callable_entry(bool& state) : active(state) {
-        if (active) throw std::logic_error("same-carrier callable reentry");
-        active = true;
-    }
-    /// Restores the idle carrier.
-    ~callable_entry() { active = false; }
-    /// Disallows duplicate entry ownership.
-    callable_entry(const callable_entry&) = delete;
-    /// Disallows duplicate assignment.
-    callable_entry& operator=(const callable_entry&) = delete;
-};
-void callable_access::call_into(const callable& fn,
-                                raw_stack& stack,
-                                std::span<const borrowed_value> arguments,
-                                std::byte* destination) {
-    if (!fn._state) throw std::logic_error("moved-from callable");
-    callable_entry entry(fn._state->active);
-    fn._state->body.call_into(stack, arguments, destination);
+callable_invocation::callable_invocation(callable code) : _code(std::move(code)) {
+    if (!_code._state) throw std::logic_error("moved-from callable");
+    if (_code._state->active) throw std::logic_error("same-carrier callable reentry");
+    _code._state->active = true;
+}
+callable_invocation::~callable_invocation() noexcept { _code._state->active = false; }
+void callable_invocation::call_into(raw_stack& stack,
+                                    std::span<const borrowed_value> arguments,
+                                    std::byte* destination) const {
+    _code._state->body.call_into(stack, arguments, destination);
 }
 } // namespace cel::detail
 namespace cel {
@@ -88,7 +76,7 @@ const stack_requirements& callable::requirements() const noexcept {
 }
 value callable::call(raw_stack& stack, std::span<const value> arguments) const {
     if (!_state) throw std::logic_error("moved-from callable");
-    detail::callable_entry entry(_state->active);
+    detail::callable_invocation entry(*this);
     const auto parameters = type().parameters();
     if (arguments.size() != parameters.size()) throw std::invalid_argument("wrong callable arity");
     // Preflight the complete declarations, including parameters the body never reads.
@@ -99,7 +87,7 @@ value callable::call(raw_stack& stack, std::span<const value> arguments) const {
     for (std::size_t i = 0; i != arguments.size(); ++i)
         views.push_back({parameters[i], detail::value_access::data(arguments[i])});
     detail::canonical_owner result(type().result());
-    _state->body.call_into(stack, views, result.bytes.data());
+    entry.call_into(stack, views, result.bytes.data());
     result.live = true;
     auto owner = detail::value_access::take(result.type, result.bytes.data());
     result.live = false;

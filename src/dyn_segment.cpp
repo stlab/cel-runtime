@@ -277,6 +277,8 @@ void dyn_segment::index_array() {
             if (!std::isfinite(number) || number < 0 || std::trunc(number) != number ||
                 number >= upper)
                 throw std::out_of_range("invalid floating array index");
+            // The exclusive bound proves this cast representable; compare the exact integer
+            // length afterwards, without rounding array length to f64, before child access.
             const auto converted = static_cast<std::size_t>(number);
             if (converted >= detail::value_access::array_size(view.operand(1, type)))
                 throw std::out_of_range("array index out of bounds");
@@ -387,6 +389,10 @@ void dyn_segment::invoke_closure(std::size_t arity) {
     }
     auto stage_type = value_type::tuple(inputs);
     detail::segment_access::append(_body, [type, stage_type](frame& scope) {
+        auto code = detail::frame_access::acquire(scope, [&](auto view) {
+            return detail::callable_access::read(view.operand(type.parameters().size(), type));
+        });
+        detail::callable_invocation entry(std::move(code));
         detail::canonical_owner stage(stage_type), result(type.result());
         std::vector<borrowed_value> views;
         views.reserve(type.parameters().size());
@@ -403,9 +409,7 @@ void dyn_segment::invoke_closure(std::size_t arity) {
                 detail::canonical_at(stage.bytes.data(), stage_type.offsets()[i - 1]));
             ++stage.suffix;
         }
-        const auto& fn = detail::callable_access::read(stage.bytes.data());
-        detail::callable_access::call_into(fn, detail::frame_access::stack(scope), views,
-                                           result.bytes.data());
+        entry.call_into(detail::frame_access::stack(scope), views, result.bytes.data());
         result.live = true;
         detail::frame_access::push(scope, result.type, &result, detail::write_owner);
     });
