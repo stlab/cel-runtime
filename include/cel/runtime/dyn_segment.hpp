@@ -171,7 +171,8 @@ public:
     /// Constructs the owned callback from its source.
     /// Complexity: O(callback construction).
     template <class G>
-    requires std::constructible_from<F, G&&> explicit signature_callback(G&& callback) :
+    requires(!std::same_as<std::remove_cvref_t<G>, signature_callback> &&
+             std::constructible_from<F, G&&>) explicit signature_callback(G&& callback) :
         _callback(std::forward<G>(callback)) {}
     /// Invokes exactly the previously selected const member.
     /// Complexity: O(callback work).

@@ -8,7 +8,6 @@
 #include <array>
 #include <cstdlib>
 #include <doctest/doctest.h>
-#include <functional>
 #include <limits>
 #include <memory>
 #include <tuple>
@@ -319,6 +318,18 @@ struct alignas(256) copy_only_factor {
     double operator()(double input) const { return factor * input; }
 };
 
+/// Owns a factor with converting construction distinct from ordinary copying.
+struct adaptable_factor {
+    double factor; ///< Owns the multiplication factor.
+    /// Initializes the factor.
+    explicit adaptable_factor(double input) : factor(input) {}
+    /// Initializes zero from a source of another type.
+    template <class T>
+    explicit adaptable_factor(const T&) : factor(0.0) {}
+    /// Multiplies the operand by the owned factor.
+    double operator()(double input) const { return factor * input; }
+};
+
 TEST_CASE("dynamic static and selected callbacks copy nonmovable lvalues independently") {
     copy_only_factor callback(3.0);
     cel::dyn_segment dynamic;
@@ -355,15 +366,16 @@ TEST_CASE("typed zero-sized unit arrays retain nested logical lengths") {
 }
 
 TEST_CASE("selected callable wrappers preserve independent lvalue copies") {
-    using callback = std::function<double(double)>;
-    auto selected = cel::with_signature<double(double)>(callback([](double n) { return n * 2.0; }));
+    auto selected = cel::with_signature<double(double)>(adaptable_factor(2.0));
     auto copied = selected;
-    selected = cel::with_signature<double(double)>(callback([](double n) { return n * 3.0; }));
+    decltype(selected) direct(selected);
+    selected = cel::with_signature<double(double)>(adaptable_factor(3.0));
     cel::dyn_segment builder;
     builder.just(cel::value::from(4.0));
     builder.op1<double, double>(copied);
     cel::raw_stack stack;
     CHECK(std::move(builder).finish().prepare<double>().call(stack) == 8.0);
+    CHECK(direct(4.0) == 8.0);
     CHECK(selected(4.0) == 12.0);
 }
 
