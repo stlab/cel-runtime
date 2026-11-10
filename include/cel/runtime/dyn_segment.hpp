@@ -112,27 +112,32 @@ consteval auto generic_member() {
 /// Rejects conversions using declared signatures and deduction-proven generic signatures.
 template <class F, class R, class... A>
 consteval bool exact_callback() {
-    if constexpr (!std::is_invocable_v<const F&, A...>)
+    using callback_type = std::decay_t<F>;
+    if constexpr (!std::is_invocable_v<const callback_type&, A...>)
         return false;
     else {
         constexpr bool result_matches =
-            std::same_as<R, std::remove_cvref_t<std::invoke_result_t<const F&, A...>>>;
-        if constexpr (requires { typename callback_signature<F>::arguments; })
+            std::same_as<R, std::remove_cvref_t<std::invoke_result_t<const callback_type&, A...>>>;
+        if constexpr (requires { typename callback_signature<callback_type>::arguments; })
             return result_matches &&
-                   std::same_as<typename callback_signature<F>::arguments, std::tuple<A...>>;
+                   std::same_as<typename callback_signature<callback_type>::arguments,
+                                std::tuple<A...>>;
         else if constexpr (requires {
-                               typename callback_signature<decltype(&F::operator())>::arguments;
+                               typename callback_signature<
+                                   decltype(&callback_type::operator())>::arguments;
                            })
             return result_matches &&
-                   std::same_as<typename callback_signature<decltype(&F::operator())>::arguments,
-                                std::tuple<A...>>;
+                   std::same_as<
+                       typename callback_signature<decltype(&callback_type::operator())>::arguments,
+                       std::tuple<A...>>;
         else {
             using member =
-                decltype(generic_member<F, std::invoke_result_t<const F&, A...>, A...>());
+                decltype(generic_member<callback_type,
+                                        std::invoke_result_t<const callback_type&, A...>, A...>());
             if constexpr (std::is_void_v<member>)
                 return false;
             else
-                return result_matches && std::is_invocable_v<member, const F&, A...>;
+                return result_matches && std::is_invocable_v<member, const callback_type&, A...>;
         }
     }
 }
@@ -163,9 +168,11 @@ class signature_callback<R(A...), F> {
     F _callback;
 
 public:
-    /// Transfers the normally constructed callback object.
+    /// Constructs the owned callback from its source.
     /// Complexity: O(callback construction).
-    explicit signature_callback(F callback) : _callback(std::move(callback)) {}
+    template <class G>
+    requires std::constructible_from<F, G&&> explicit signature_callback(G&& callback) :
+        _callback(std::forward<G>(callback)) {}
     /// Invokes exactly the previously selected const member.
     /// Complexity: O(callback work).
     R operator()(A... arguments) const {
@@ -193,8 +200,9 @@ struct construction_effect {
 /// Complexity: O(callback construction) time and capture space.
 /// Example: `builder.op1<double, double>(with_signature<double(double)>(overloaded{}));`.
 template <class Signature, class F>
-requires(detail::signature_binding<Signature, F>::available) auto with_signature(F callback) {
-    return detail::signature_callback<Signature, F>(std::move(callback));
+requires(detail::signature_binding<Signature, std::decay_t<F>>::available) auto with_signature(
+    F&& callback) {
+    return detail::signature_callback<Signature, std::decay_t<F>>(std::forward<F>(callback));
 }
 
 /// Checks stack effects while constructing a move-only ordinary operation sequence.
@@ -380,13 +388,15 @@ public:
     /// Ambiguous/uninspectable callbacks require with_signature's exact member selection.
     /// Callbacks return R or a reference to R; no implicit result conversion is admitted.
     /// Callbacks may reference caller-owned state; freezing does not make it thread-safe.
+    /// Lvalue callbacks are copied; rvalue callbacks are moved into owned decayed storage.
+    /// Over-aligned callback operands use reference parameters on MSVC.
     /// Throws invalid_argument for current stack mismatch before publishing an opcode.
     /// Throws std::overflow_error for canonical frame extent or depth overflow.
     /// Complexity: O(arity + compared metadata + capture construction) time,
     /// plus O(current stack depth) metadata transfer on capacity growth.
     /// Example: `builder.op<double, double>([](double n) { return n * 2.0; });`.
     template <class R, class... Args, class F>
-    requires(detail::exact_callback<F, R, Args...>()) void op(F callback) {
+    requires(detail::exact_callback<F, R, Args...>()) void op(F&& callback) {
         static_assert((std::same_as<Args, std::remove_cvref_t<Args>> && ...));
         const std::array<value_type, sizeof...(Args)> inputs{
             detail::concrete_adapter<Args>::type()...};
@@ -398,7 +408,7 @@ public:
         }();
         const auto effect = check_operation(inputs, outputs);
         _body.template push_op<R, Args...>(
-            [callback = std::move(callback)](frame&, Args... operands) -> R {
+            [callback = std::forward<F>(callback)](frame&, Args&&... operands) -> R {
                 return std::invoke(callback, std::move(operands)...);
             });
         apply_operation(sizeof...(Args), outputs, effect);
@@ -407,30 +417,30 @@ public:
     /// Complexity: O(capture construction), plus O(current stack depth) on metadata growth.
     /// Example: `builder.op0<double>([] { return 2.0; });`.
     template <class R, class F>
-    requires(detail::exact_callback<F, R>()) void op0(F callback) {
-        op<R>(std::move(callback));
+    requires(detail::exact_callback<F, R>()) void op0(F&& callback) {
+        op<R>(std::forward<F>(callback));
     }
     /// Replaces one exact operand; follows op's validation and exception contract.
     /// Complexity: O(compared metadata + capture construction).
     /// Example: `builder.op1<bool, bool>([](bool b) { return !b; });`.
     template <class R, class A, class F>
-    requires(detail::exact_callback<F, R, A>()) void op1(F callback) {
-        op<R, A>(std::move(callback));
+    requires(detail::exact_callback<F, R, A>()) void op1(F&& callback) {
+        op<R, A>(std::forward<F>(callback));
     }
     /// Consumes two operands older-first; follows op's validation and exception contract.
     /// Complexity: O(compared metadata + capture construction).
     /// Example: `builder.op2<double, double, double>([](double a, double b) { return a - b; });`.
     template <class R, class A, class B, class F>
-    requires(detail::exact_callback<F, R, A, B>()) void op2(F callback) {
-        op<R, A, B>(std::move(callback));
+    requires(detail::exact_callback<F, R, A, B>()) void op2(F&& callback) {
+        op<R, A, B>(std::forward<F>(callback));
     }
     /// Consumes three source-order operands; follows op's validation and exception contract.
     /// Complexity: O(compared metadata + capture construction).
     /// Example: `builder.op3<double, double, double, double>(
     /// [](double a, double b, double c) { return a + b + c; });`.
     template <class R, class A, class B, class C, class F>
-    requires(detail::exact_callback<F, R, A, B, C>()) void op3(F callback) {
-        op<R, A, B, C>(std::move(callback));
+    requires(detail::exact_callback<F, R, A, B, C>()) void op3(F&& callback) {
+        op<R, A, B, C>(std::forward<F>(callback));
     }
     /// Freezes exactly one result, mapping an empty final stack to source unit.
     /// Throws invalid_argument for leftover operands instead of discarding them.

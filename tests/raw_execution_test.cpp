@@ -196,6 +196,30 @@ struct alignas(256) owning_capture {
     }
 };
 
+/// Supplies a copyable, nonmovable over-aligned callback with independent state.
+struct alignas(256) copy_only_capture {
+    double number; ///< Owns the callback's result.
+    /// Initializes the result.
+    explicit copy_only_capture(double input) : number(input) {}
+    /// Copies the result independently.
+    copy_only_capture(const copy_only_capture&) = default;
+    /// Disallows move construction.
+    copy_only_capture(copy_only_capture&&) = delete;
+    /// Returns the owned result.
+    double operator()(cel::frame&) const { return number; }
+};
+
+TEST_CASE("raw operations copy nonmovable lvalue captures independently") {
+    copy_only_capture input(7.0);
+    cel::raw_segment segment;
+    segment.push_op0<double>(input);
+    input.number = 99.0;
+    cel::raw_stack stack;
+    cel::frame scope(stack);
+    segment.execute(scope);
+    CHECK(scope.pop<double>() == 7.0);
+}
+
 /// Verifies independent instruction ownership and stable nontrivial capture addresses.
 TEST_CASE("captures survive input owners segment growth and segment moves") {
     int released = 0;

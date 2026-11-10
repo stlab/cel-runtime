@@ -80,11 +80,11 @@ class segment<type_list<Args...>, type_list<Stack...>> {
     /// Precondition: N operands exist, established by public constraints.
     /// Complexity: O(arity + compared metadata + capture construction).
     template <class R, std::size_t N, class F, std::size_t... I>
-    auto top(F callback, std::index_sequence<I...>) && {
+    auto top(F&& callback, std::index_sequence<I...>) && {
         return std::move(*this)
             .template op<R,
                          std::tuple_element_t<sizeof...(Stack) - N + I, std::tuple<Stack...>>...>(
-                std::move(callback));
+                std::forward<F>(callback));
     }
 
 public:
@@ -109,8 +109,8 @@ public:
     /// Example: `auto next = std::move(b).op<double, double>([](double n) { return n; });`.
     template <class R, class... A, class F>
     requires(detail::static_stack<type_list<Stack...>>::template matches<A...>() &&
-             detail::exact_callback<F, R, A...>()) auto op(F callback) && {
-        _builder.template op<R, A...>(std::move(callback));
+             detail::exact_callback<F, R, A...>()) auto op(F&& callback) && {
+        _builder.template op<R, A...>(std::forward<F>(callback));
         using output =
             typename detail::static_stack<type_list<Stack...>>::template effect<R, sizeof...(A)>;
         return segment<type_list<Args...>, output>(std::move(_builder));
@@ -119,23 +119,23 @@ public:
     /// Complexity: O(capture construction).
     /// Example: `auto next = std::move(b).op0<bool>([] { return true; });`.
     template <class R, class F>
-    auto op0(F callback) && {
-        return std::move(*this).template op<R>(std::move(callback));
+    auto op0(F&& callback) && {
+        return std::move(*this).template op<R>(std::forward<F>(callback));
     }
     /// Replaces the top operand using its statically known type.
     /// Complexity: O(compared metadata + capture construction).
     /// Example: `auto next = std::move(b).op1<bool>([](double n) { return n > 0.0; });`.
     template <class R, class F>
-    requires(sizeof...(Stack) >= 1) auto op1(F callback) && {
-        return std::move(*this).template top<R, 1>(std::move(callback),
+    requires(sizeof...(Stack) >= 1) auto op1(F&& callback) && {
+        return std::move(*this).template top<R, 1>(std::forward<F>(callback),
                                                    std::make_index_sequence<1>{});
     }
     /// Consumes two older-first operands using their statically known types.
     /// Complexity: O(compared metadata + capture construction).
     /// Example: `auto next = std::move(b).op2<double>([](double a, double b) { return a - b; });`.
     template <class R, class F>
-    requires(sizeof...(Stack) >= 2) auto op2(F callback) && {
-        return std::move(*this).template top<R, 2>(std::move(callback),
+    requires(sizeof...(Stack) >= 2) auto op2(F&& callback) && {
+        return std::move(*this).template top<R, 2>(std::forward<F>(callback),
                                                    std::make_index_sequence<2>{});
     }
     /// Consumes three source-order operands using their statically known types.
@@ -143,8 +143,8 @@ public:
     /// Example: `auto next = std::move(b).op3<double>(
     /// [](double a, double b, double c) { return a - b - c; });`.
     template <class R, class F>
-    requires(sizeof...(Stack) >= 3) auto op3(F callback) && {
-        return std::move(*this).template top<R, 3>(std::move(callback),
+    requires(sizeof...(Stack) >= 3) auto op3(F&& callback) && {
+        return std::move(*this).template top<R, 3>(std::forward<F>(callback),
                                                    std::make_index_sequence<3>{});
     }
     /// Freezes exactly one static result, or source unit for an empty stack.

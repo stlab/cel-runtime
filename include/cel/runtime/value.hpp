@@ -6,6 +6,7 @@
 
 #include <array>
 #include <bit>
+#include <cassert>
 #include <cstring>
 #include <memory>
 #include <span>
@@ -198,6 +199,7 @@ struct concrete_adapter {
     /// Precondition: shape is type() and data contains its initialized representation.
     /// Complexity: O(sizeof(T)) time.
     static T read(const value_type&, const std::byte* data) {
+        assert(data != nullptr);
         std::array<std::byte, sizeof(T)> bytes{};
         std::memcpy(bytes.data(), data, bytes.size());
         return std::bit_cast<T>(bytes);

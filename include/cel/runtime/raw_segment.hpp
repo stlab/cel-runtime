@@ -4,6 +4,7 @@
 #include <array>
 #include <cel/runtime/detail/retirement.hpp>
 #include <cel/runtime/raw_stack.hpp>
+#include <concepts>
 #include <functional>
 #include <memory>
 #include <tuple>
@@ -50,10 +51,11 @@ class raw_segment {
             else
                 return std::array{detail::concrete_adapter<R>::type()};
         }
-        /// Constructs signature metadata and transfers callback ownership normally.
-        explicit operation(F input) :
+        /// Constructs signature metadata and an owned callback from its source.
+        template <class G>
+        requires std::constructible_from<F, G&&> explicit operation(G&& input) :
             inputs{detail::concrete_adapter<Args>::type()...}, outputs(result_types()),
-            callback(std::move(input)) {}
+            callback(std::forward<G>(input)) {}
         /// Reads arguments in source order before retiring canonical operands.
         /// Complexity: O(operand payload size) time and concrete argument space.
         template <std::size_t... I>
@@ -110,19 +112,22 @@ public:
     /// Example: `program.execute(scope);`.
     void execute(frame& scope) const;
     /// Appends an arbitrary-arity typed operation with source-order operands.
-    /// F is invoked as const F&(frame&, Args...) and its result initializes R, or R is void.
+    /// The stored callback is invoked as const decay_t<F>&(frame&, Args...) and initializes R,
+    /// or R is void.
     /// void consumes operands and produces no operand; tuple<> produces source unit.
     /// Capture ownership is independent of the input object after successful construction.
+    /// Lvalue callbacks are copied; rvalue callbacks are moved into owned decayed storage.
     /// Captures must have nonthrowing destructors; scalar metadata is prepared at append time.
     /// Complexity: O(arity + capture construction) time and stored space.
     /// Example: `p.push_op<double, double>([](frame&, double n) { return n * 2.0; });`.
     template <class R, class... Args, class F>
-    void push_op(F callback) {
-        static_assert(std::is_nothrow_destructible_v<F>);
-        static_assert(std::is_invocable_r_v<R, const F&, frame&, Args...>);
-        using stored = operation<F, R, Args...>;
+    void push_op(F&& callback) {
+        using capture_type = std::decay_t<F>;
+        static_assert(std::is_nothrow_destructible_v<capture_type>);
+        static_assert(std::is_invocable_r_v<R, const capture_type&, frame&, Args...>);
+        using stored = operation<capture_type, R, Args...>;
         auto* location = static_cast<stored*>(allocate_capture(sizeof(stored), alignof(stored)));
-        auto* capture = std::construct_at(location, std::move(callback));
+        auto* capture = std::construct_at(location, std::forward<F>(callback));
         try {
             append(capture, stored::execute, stored::destroy);
         } catch (...) {
@@ -134,31 +139,31 @@ public:
     /// Complexity: O(capture construction) time and space.
     /// Example: `p.push_op0<bool>([](frame&) { return true; });`.
     template <class R, class F>
-    void push_op0(F callback) {
-        push_op<R>(std::move(callback));
+    void push_op0(F&& callback) {
+        push_op<R>(std::forward<F>(callback));
     }
     /// Appends a unary operation using the arbitrary-arity primitive.
     /// Complexity: O(capture construction) time and space.
     /// Example: `p.push_op1<bool, bool>([](frame&, bool b) { return !b; });`.
     template <class R, class A, class F>
-    void push_op1(F callback) {
-        push_op<R, A>(std::move(callback));
+    void push_op1(F&& callback) {
+        push_op<R, A>(std::forward<F>(callback));
     }
     /// Appends a binary operation, with the older operand first.
     /// Complexity: O(capture construction) time and space.
     /// Example: `p.push_op2<double, double, double>(
     /// [](frame&, double a, double b) { return a / b; });`.
     template <class R, class A, class B, class F>
-    void push_op2(F callback) {
-        push_op<R, A, B>(std::move(callback));
+    void push_op2(F&& callback) {
+        push_op<R, A, B>(std::forward<F>(callback));
     }
     /// Appends a ternary operation, with operands in source order.
     /// Complexity: O(capture construction) time and space.
     /// Example: `p.push_op3<double, double, double, double>(
     /// [](frame&, double a, double b, double c) { return a - b - c; });`.
     template <class R, class A, class B, class C, class F>
-    void push_op3(F callback) {
-        push_op<R, A, B, C>(std::move(callback));
+    void push_op3(F&& callback) {
+        push_op<R, A, B, C>(std::forward<F>(callback));
     }
 };
 } // namespace cel

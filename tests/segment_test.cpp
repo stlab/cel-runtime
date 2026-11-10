@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdlib>
 #include <doctest/doctest.h>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <tuple>
@@ -305,11 +306,72 @@ TEST_CASE("typed composite calls borrow inputs and return disjoint nested result
     CHECK(std::get<0>(second)[0][1] == 2.0);
 }
 
+/// Owns an over-aligned factor that can be copied but not moved.
+struct alignas(256) copy_only_factor {
+    double factor; ///< Owns the multiplication factor.
+    /// Initializes the factor.
+    explicit copy_only_factor(double input) : factor(input) {}
+    /// Copies the factor independently.
+    copy_only_factor(const copy_only_factor&) = default;
+    /// Disallows move construction.
+    copy_only_factor(copy_only_factor&&) = delete;
+    /// Multiplies the operand by the owned factor.
+    double operator()(double input) const { return factor * input; }
+};
+
+TEST_CASE("dynamic static and selected callbacks copy nonmovable lvalues independently") {
+    copy_only_factor callback(3.0);
+    cel::dyn_segment dynamic;
+    dynamic.just(cel::value::from(2.0));
+    dynamic.op1<double, double>(callback);
+    cel::segment<cel::type_list<double>> typed;
+    auto scaled = std::move(typed).op1<double>(callback);
+    auto selected = cel::with_signature<double(double)>(callback);
+    cel::dyn_segment explicit_signature;
+    explicit_signature.just(cel::value::from(4.0));
+    explicit_signature.op1<double, double>(selected);
+    callback.factor = 99.0;
+    cel::raw_stack stack;
+    CHECK(std::move(dynamic).finish().prepare<double>().call(stack) == 6.0);
+    CHECK(std::move(scaled).finish().prepare<double, double>().call(stack, 5.0) == 15.0);
+    CHECK(std::move(explicit_signature).finish().prepare<double>().call(stack) == 12.0);
+}
+
+TEST_CASE("typed zero-sized unit arrays retain nested logical lengths") {
+    using units = std::vector<std::vector<std::tuple<>>>;
+    cel::dyn_segment builder;
+    builder.push_argument(0, cel::detail::concrete_adapter<units>::type());
+    auto prepared = std::move(builder).finish().prepare<units, units>();
+    const units input{std::vector<std::tuple<>>(3), {}, std::vector<std::tuple<>>(1)};
+    cel::raw_stack stack;
+    auto result = prepared.call(stack, input);
+    REQUIRE(result.size() == 3);
+    CHECK(result[0].size() == 3);
+    CHECK(result[1].empty());
+    CHECK(result[2].size() == 1);
+    result[0].clear();
+    CHECK(input[0].size() == 3);
+    CHECK(prepared.call(stack, input)[0].size() == 3);
+}
+
+TEST_CASE("selected callable wrappers preserve independent lvalue copies") {
+    using callback = std::function<double(double)>;
+    auto selected = cel::with_signature<double(double)>(callback([](double n) { return n * 2.0; }));
+    auto copied = selected;
+    selected = cel::with_signature<double(double)>(callback([](double n) { return n * 3.0; }));
+    cel::dyn_segment builder;
+    builder.just(cel::value::from(4.0));
+    builder.op1<double, double>(copied);
+    cel::raw_stack stack;
+    CHECK(std::move(builder).finish().prepare<double>().call(stack) == 8.0);
+    CHECK(selected(4.0) == 12.0);
+}
+
 TEST_CASE("valid over-aligned client root arguments and results are admitted") {
     cel::dyn_segment builder;
     builder.push_argument(0, cel::value_type::leaf<client_leaf>());
     builder.op1<client_leaf, client_leaf>(
-        [](client_leaf source) { return client_leaf{source.number + 1}; });
+        [](const client_leaf& source) { return client_leaf{source.number + 1}; });
     auto prepared = std::move(builder).finish().prepare<client_leaf, client_leaf>();
     cel::raw_stack stack;
     stack.reserve(2048, 256);
@@ -792,7 +854,8 @@ TEST_CASE("exact callback selection rejects ambiguous conversions and accepts co
     cel::dyn_segment pointer;
     pointer.just(cel::value::from(4.0));
     pointer.op1<double, double>(static_cast<pointer_callback::function>(pointer_callback{}));
-    CHECK(std::move(pointer).finish().prepare<double>().call(stack) == 8.0);
+    pointer.op1<double, double>(pointer_callback::twice);
+    CHECK(std::move(pointer).finish().prepare<double>().call(stack) == 16.0);
     cel::dyn_segment qualified;
     qualified.just(cel::value::from(3.0));
     qualified.op1<double, double>(cel::with_signature<double(double)>(lvalue_noexcept_callback{}));
@@ -836,7 +899,8 @@ TEST_CASE("published reservations cover hidden intermediate alignment and caller
     cel::dyn_segment builder;
     builder.op0<double>([] { return 2.0; });
     builder.op0<client_leaf>([] { return client_leaf{7}; });
-    builder.op1<double, client_leaf>([](client_leaf source) { return double(source.number); });
+    builder.op1<double, client_leaf>(
+        [](const client_leaf& source) { return double(source.number); });
     builder.op2<double, double, double>([](double a, double b) { return a + b; });
     auto program = std::move(builder).finish();
     CHECK(program.result_type().byte_layout().alignment == alignof(double));
