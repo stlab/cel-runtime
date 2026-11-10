@@ -328,5 +328,14 @@ struct concrete_adapter<std::tuple<T...>> {
 };
 
 } // namespace detail
+/// Returns the runtime's complete descriptor for a trusted native value type.
+/// Removes cv/reference qualifiers; leaves must be trivially copyable.
+/// Tuples and vectors use canonical structural adapters, not native object layouts.
+/// Complexity: O(distinct descriptor nodes and fields) on first use, O(1) thereafter.
+/// Example: `auto type = native_type<std::vector<std::tuple<bool, double>>>();`.
+template <class T>
+value_type native_type() {
+    return detail::concrete_adapter<std::remove_cvref_t<T>>::type();
+}
 } // namespace cel
 #endif

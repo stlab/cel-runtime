@@ -266,6 +266,11 @@ public:
     /// Throws overflow_error if ambient plus local depth overflows.
     /// Example: `auto ambient = builder.snapshot();`.
     stack_origin snapshot() const;
+    /// Returns the absolute origin below count local operands without mutation or allocation.
+    /// Zero returns the current cursor/depth; the full local depth returns origin().
+    /// Throws invalid_argument on local underflow and overflow_error on depth overflow.
+    /// Example: `builder.make_tuple(2, builder.origin_below(2));`.
+    stack_origin origin_below(std::size_t count) const;
     /// Returns the origin immediately below the top local operand.
     /// Throws invalid_argument if no local operand exists.
     /// Example: `dyn_segment then_body(builder.before_top());`.
@@ -408,14 +413,14 @@ public:
     /// Replaces one exact operand; follows op's validation and exception contract.
     /// Complexity: O(compared metadata + capture construction).
     /// Example: `builder.op1<bool, bool>([](bool b) { return !b; });`.
-    template <class A, class R, class F>
+    template <class R, class A, class F>
     requires(detail::exact_callback<F, R, A>()) void op1(F callback) {
         op<R, A>(std::move(callback));
     }
     /// Consumes two operands older-first; follows op's validation and exception contract.
     /// Complexity: O(compared metadata + capture construction).
     /// Example: `builder.op2<double, double, double>([](double a, double b) { return a - b; });`.
-    template <class A, class B, class R, class F>
+    template <class R, class A, class B, class F>
     requires(detail::exact_callback<F, R, A, B>()) void op2(F callback) {
         op<R, A, B>(std::move(callback));
     }
@@ -423,7 +428,7 @@ public:
     /// Complexity: O(compared metadata + capture construction).
     /// Example: `builder.op3<double, double, double, double>(
     /// [](double a, double b, double c) { return a + b + c; });`.
-    template <class A, class B, class C, class R, class F>
+    template <class R, class A, class B, class C, class F>
     requires(detail::exact_callback<F, R, A, B, C>()) void op3(F callback) {
         op<R, A, B, C>(std::move(callback));
     }

@@ -26,7 +26,7 @@ cpp_library_setup(
     REQUIRES_CPP_VERSION 20
     HEADERS runtime.hpp runtime/layout.hpp runtime/value_type.hpp runtime/value.hpp runtime/raw_stack.hpp runtime/raw_segment.hpp runtime/dyn_segment.hpp runtime/segment.hpp runtime/callable.hpp runtime/detail/retirement.hpp
     SOURCES storage.cpp value_type.cpp value.cpp raw_stack.cpp raw_segment.cpp dyn_segment.cpp callable.cpp
-    TESTS storage_test.cpp value_test.cpp resource_test.cpp raw_execution_test.cpp segment_test.cpp composite_execution_test.cpp callable_test.cpp executable_retirement_test.cpp nontrivial_leaf_fail.cpp typed_operand_fail.cpp static_operand_fail.cpp overloaded_operand_fail.cpp generic_conversion_fail.cpp nondeduced_generic_fail.cpp
+    TESTS storage_test.cpp value_test.cpp resource_test.cpp raw_execution_test.cpp segment_test.cpp composite_execution_test.cpp callable_test.cpp executable_retirement_test.cpp native_contract_test.cpp nontrivial_leaf_fail.cpp typed_operand_fail.cpp static_operand_fail.cpp overloaded_operand_fail.cpp generic_conversion_fail.cpp nondeduced_generic_fail.cpp
     EXAMPLES getting_started.cpp
     DOCS_INPUTS README.md docs/get-started.md docs/execution.md docs/parity.md docs/runtime-milestone.md
     DOCS_OPTIONS "USE_MDFILE_AS_MAINPAGE = ${CMAKE_CURRENT_SOURCE_DIR}/README.md"

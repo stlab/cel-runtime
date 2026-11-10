@@ -211,7 +211,7 @@ TEST_CASE("dynamic ordered mixed operations freeze reads and literals") {
     builder.push_argument(1, cel::value_type::leaf<double>());
     builder.just(cel::value::from(true));
     builder.push_argument(0, cel::value_type::leaf<double>());
-    builder.op3<double, bool, double, double>(
+    builder.op3<double, double, bool, double>(
         [](double older, bool flag, double newer) { return flag ? older - newer : 0.0; });
     auto program = std::move(builder).finish();
     const std::array inputs{cel::value::from(2.0), cel::value::from(10.0)};
@@ -517,7 +517,7 @@ TEST_CASE("raw acquisition and emitted clone failures clean suffixes and permit 
     const auto type = cel::detail::concrete_adapter<std::vector<double>>::type();
     builder.push_argument(0, type);
     builder.push_argument(0, type);
-    builder.op2<std::vector<double>, std::vector<double>, double>(
+    builder.op2<double, std::vector<double>, std::vector<double>>(
         [&effects](std::vector<double> a, std::vector<double> b) {
             ++effects;
             return a[0] + b[0];
@@ -816,12 +816,12 @@ TEST_CASE("provably exact generic callbacks retain source operand identities") {
     cel::dyn_segment mixed;
     mixed.just(cel::value::from(6.0));
     mixed.just(cel::value::from(true));
-    mixed.op2<double, bool, double>(cel::with_signature<double(double, bool)>(
+    mixed.op2<double, double, bool>(cel::with_signature<double(double, bool)>(
         [](double number, auto flag) { return flag ? number : 0.0; }));
     CHECK(std::move(mixed).finish().prepare<double>().call(stack) == 6.0);
     cel::dyn_segment pointer;
     pointer.push_argument(0, cel::value_type::leaf<const client_leaf*>());
-    pointer.op1<const client_leaf*, int>([](const auto* source) { return source->number; });
+    pointer.op1<int, const client_leaf*>([](const auto* source) { return source->number; });
     const client_leaf source{41};
     CHECK(std::move(pointer).finish().prepare<int, const client_leaf*>().call(stack, &source) ==
           41);
@@ -836,7 +836,7 @@ TEST_CASE("published reservations cover hidden intermediate alignment and caller
     cel::dyn_segment builder;
     builder.op0<double>([] { return 2.0; });
     builder.op0<client_leaf>([] { return client_leaf{7}; });
-    builder.op1<client_leaf, double>([](client_leaf source) { return double(source.number); });
+    builder.op1<double, client_leaf>([](client_leaf source) { return double(source.number); });
     builder.op2<double, double, double>([](double a, double b) { return a + b; });
     auto program = std::move(builder).finish();
     CHECK(program.result_type().byte_layout().alignment == alignof(double));
@@ -877,7 +877,7 @@ TEST_CASE("published reservations cover hidden intermediate alignment and caller
 TEST_CASE("published reservation covers larger temporary canonical extents") {
     cel::dyn_segment builder;
     builder.op0<large_temporary>([] { return large_temporary{}; });
-    builder.op1<large_temporary, bool>(
+    builder.op1<bool, large_temporary>(
         [](large_temporary source) { return source.data[0] == std::byte{}; });
     auto bound = std::move(builder).finish().prepare<bool>();
     CHECK(bound.requirements().frame_extent == sizeof(large_temporary));

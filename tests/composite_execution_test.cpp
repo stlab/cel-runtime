@@ -274,7 +274,7 @@ TEST_CASE("lazy join rejects wrong result origins and conflicting shared reads b
     cel::dyn_segment yes(b.before_top()), no(b.before_top());
     yes.push_argument(0, cel::value_type::leaf<bool>());
     no.push_argument(0, cel::value_type::leaf<double>());
-    no.op1<double, bool>([](double n) { return n != 0; });
+    no.op1<bool, double>([](double n) { return n != 0; });
     CHECK_THROWS_AS(b.if_else(std::move(yes), std::move(no)), std::invalid_argument);
     cel::dyn_segment wrong_result(b.before_top()), good(b.before_top());
     wrong_result.just(cel::value::from(1.0));
@@ -392,14 +392,12 @@ TEST_CASE("lazy requirements retain zero byte prefix depth and maximum selected 
         no.just(cel::value{});
     no.make_tuple(7, no.origin());
     no.op1<std::tuple<std::tuple<>, std::tuple<>, std::tuple<>, std::tuple<>, std::tuple<>,
-                      std::tuple<>, std::tuple<>>,
+                      std::tuple<>, std::tuple<>, std::tuple<>, std::tuple<>, std::tuple<>>,
            std::tuple<std::tuple<>, std::tuple<>, std::tuple<>, std::tuple<>, std::tuple<>,
-                      std::tuple<>, std::tuple<>, std::tuple<>, std::tuple<>, std::tuple<>>>(
-        [](auto) {
-            return std::tuple<std::tuple<>, std::tuple<>, std::tuple<>, std::tuple<>, std::tuple<>,
-                              std::tuple<>, std::tuple<>, std::tuple<>, std::tuple<>,
-                              std::tuple<>>{};
-        });
+                      std::tuple<>, std::tuple<>>>([](auto) {
+        return std::tuple<std::tuple<>, std::tuple<>, std::tuple<>, std::tuple<>, std::tuple<>,
+                          std::tuple<>, std::tuple<>, std::tuple<>, std::tuple<>, std::tuple<>>{};
+    });
     b.if_else(std::move(yes), std::move(no));
     b.make_tuple(2, {});
     auto program = std::move(b).finish();

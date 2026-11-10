@@ -102,8 +102,7 @@ detail::construction_effect dyn_segment::check_operation(std::span<const value_t
     const auto remaining = _stack.size() - inputs.size();
     const auto depth = detail::checked_add(remaining, outputs.size());
     (void)detail::checked_add(_origin.depth, depth);
-    detail::construction_effect effect{remaining == 0 ? _origin.bytes : _end_cursors[remaining - 1],
-                                       _requirements};
+    detail::construction_effect effect{origin_below(inputs.size()).bytes, _requirements};
     // Account for the canonical result only after the consumed suffix has retired.
     for (const auto& output : outputs) {
         const auto bytes = output.byte_layout();
@@ -167,24 +166,20 @@ void dyn_segment::just(value literal) {
     detail::segment_access::append(_body, detail::literal_instruction{std::move(literal)});
     apply_operation(0, outputs, effect);
 }
-stack_origin dyn_segment::snapshot() const {
-    return {_stack.empty() ? _origin.bytes : _end_cursors.back(),
-            detail::checked_add(_origin.depth, _stack.size())};
-}
-stack_origin dyn_segment::before_top() const {
-    if (_stack.empty()) throw std::invalid_argument("no local operand");
-    const auto remaining = _stack.size() - 1;
+stack_origin dyn_segment::snapshot() const { return origin_below(0); }
+stack_origin dyn_segment::origin_below(std::size_t count) const {
+    if (count > _stack.size()) throw std::invalid_argument("operation operand underflow");
+    const auto remaining = _stack.size() - count;
     return {remaining == 0 ? _origin.bytes : _end_cursors[remaining - 1],
             detail::checked_add(_origin.depth, remaining)};
 }
+stack_origin dyn_segment::before_top() const { return origin_below(1); }
 void dyn_segment::pack(value_type type,
                        std::span<const std::size_t> permutation,
                        stack_origin ambient) {
     const auto count = type.offsets().size();
     if (count > _stack.size()) throw std::invalid_argument("packing operand underflow");
-    const auto remaining = _stack.size() - count;
-    const stack_origin expected{remaining == 0 ? _origin.bytes : _end_cursors[remaining - 1],
-                                detail::checked_add(_origin.depth, remaining)};
+    const auto expected = origin_below(count);
     if (ambient != expected) throw std::invalid_argument("wrong packing origin");
     if (permutation.size() != count) throw std::invalid_argument("wrong packing permutation");
     std::vector<bool> seen(count, false);
@@ -245,9 +240,7 @@ void dyn_segment::make_record(value_type record,
 }
 void dyn_segment::make_array(std::size_t count, value_type element, stack_origin ambient) {
     if (count > _stack.size()) throw std::invalid_argument("array operand underflow");
-    const auto remaining = _stack.size() - count;
-    const stack_origin expected{remaining == 0 ? _origin.bytes : _end_cursors[remaining - 1],
-                                detail::checked_add(_origin.depth, remaining)};
+    const auto expected = origin_below(count);
     if (ambient != expected) throw std::invalid_argument("wrong array origin");
     detail::require_ownership(element);
     const auto type = value_type::array(element);
@@ -338,9 +331,7 @@ void dyn_segment::make_range(range_kind kind) {
     auto type = value_type::range(kind, value_type::leaf<double>());
     const auto count = type.offsets().size();
     if (count > _stack.size()) throw std::invalid_argument("range operand underflow");
-    const auto remaining = _stack.size() - count;
-    const stack_origin ambient{remaining == 0 ? _origin.bytes : _end_cursors[remaining - 1],
-                               detail::checked_add(_origin.depth, remaining)};
+    const auto ambient = origin_below(count);
     std::vector<std::size_t> mapping(count);
     for (std::size_t i = 0; i != count; ++i)
         mapping[i] = i;
@@ -413,9 +404,8 @@ void dyn_segment::invoke_closure(std::size_t arity) {
     auto effect = check_operation(inputs, outputs);
     const auto& known_call = _known_calls[position];
     if (known_call.has_value()) {
-        const auto ambient = position == 0 ? _origin.bytes : _end_cursors[position - 1];
-        const auto required =
-            known_call->for_prefix(ambient, detail::checked_add(_origin.depth, position));
+        const auto ambient = origin_below(arity + 1);
+        const auto required = known_call->for_prefix(ambient.bytes, ambient.depth);
         effect.requirements.alignment =
             std::max(effect.requirements.alignment, required.bytes.alignment);
         effect.requirements.frame_extent =

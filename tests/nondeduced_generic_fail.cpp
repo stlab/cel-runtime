@@ -14,5 +14,5 @@ struct nondeduced {
 int main() {
     cel::dyn_segment builder;
     builder.just(cel::value::from(true));
-    builder.op1<bool, double>(nondeduced{});
+    builder.op1<double, bool>(nondeduced{});
 }

@@ -4,5 +4,5 @@
 int main() {
     cel::dyn_segment builder;
     builder.just(cel::value::from(true));
-    builder.op1<bool, double>([](double number) { return number; });
+    builder.op1<double, bool>([](double number) { return number; });
 }

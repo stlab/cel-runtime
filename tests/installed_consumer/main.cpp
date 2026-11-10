@@ -17,7 +17,10 @@ int main() try {
     const auto depth = stack.depth();
 
     cel::dyn_segment scalar;
-    scalar.push_argument(0, cel::value_type::leaf<double>());
+    scalar.push_argument(0, cel::native_type<double>());
+    if (scalar.origin_below(0) != cel::stack_origin{sizeof(double), 1} ||
+        scalar.origin_below(1) != cel::stack_origin{})
+        return 10;
     const auto operands = scalar.operand_types(1);
     if (operands.size() != 1 || !operands[0].compatible_with(cel::value_type::leaf<double>()) ||
         operands[0].compatible_with(cel::value_type::leaf<bool>()) ||
@@ -33,7 +36,7 @@ int main() try {
     using nested = std::tuple<bool, std::vector<std::tuple<double, std::vector<bool>>>>;
     const nested input{true, {{2.0, {true, false}}}};
     cel::dyn_segment composite;
-    composite.push_argument(0, cel::value::from(input).type());
+    composite.push_argument(0, cel::native_type<nested>());
     auto copy = std::move(composite).finish().prepare<nested, nested>();
     auto first = copy.call(stack, input);
     auto second = copy.call(stack, input);

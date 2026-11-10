@@ -422,7 +422,7 @@ TEST_CASE("same carrier reentry rejects and throwing bodies preserve stack reuse
 TEST_CASE("direct known callee requirements include intermediate alignment and extent") {
     cel::dyn_segment body;
     body.op0<wide_result>([] { return wide_result{true}; });
-    body.op1<wide_result, bool>([](wide_result input) { return input.flag; });
+    body.op1<bool, wide_result>([](wide_result input) { return input.flag; });
     cel::dyn_segment b;
     b.push_closure(std::move(body).finish(), {});
     b.invoke_closure(0);
@@ -667,7 +667,7 @@ TEST_CASE("dynamic call rejects exact signature mismatches before emitted callba
 TEST_CASE("throwing dynamic bodies retire staged composites without replacing exceptions") {
     cel::dyn_segment body;
     body.push_argument(0, cel::value_type::array(cel::value_type::leaf<double>()));
-    body.op1<std::vector<double>, double>([](std::vector<double>) -> double {
+    body.op1<double, std::vector<double>>([](std::vector<double>) -> double {
         throw std::runtime_error("specific nested body context");
     });
     cel::dyn_segment b;

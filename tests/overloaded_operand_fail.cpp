@@ -13,5 +13,5 @@ struct overloaded {
 int main() {
     cel::dyn_segment builder;
     builder.just(cel::value::from(true));
-    builder.op1<bool, double>(overloaded{});
+    builder.op1<double, bool>(overloaded{});
 }

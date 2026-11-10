@@ -14,5 +14,5 @@ struct fixed_generic {
 int main() {
     cel::dyn_segment builder;
     builder.just(cel::value::from(true));
-    builder.op1<bool, double>(fixed_generic{});
+    builder.op1<double, bool>(fixed_generic{});
 }
