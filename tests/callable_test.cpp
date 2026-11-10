@@ -422,7 +422,7 @@ TEST_CASE("same carrier reentry rejects and throwing bodies preserve stack reuse
 TEST_CASE("direct known callee requirements include intermediate alignment and extent") {
     cel::dyn_segment body;
     body.op0<wide_result>([] { return wide_result{true}; });
-    body.op1<bool, wide_result>([](wide_result input) { return input.flag; });
+    body.op1<bool, wide_result>([](const wide_result& input) { return input.flag; });
     cel::dyn_segment b;
     b.push_closure(std::move(body).finish(), {});
     b.invoke_closure(0);
