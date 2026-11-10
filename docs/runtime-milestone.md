@@ -116,18 +116,24 @@ ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
   ctest --test-dir build/sanitized --output-on-failure
 ```
 
-All 16 CTests, including six compile-fail gates, the runnable example, and
+The original milestone's 16 CTests, including six compile-fail gates, the runnable example, and
 installed consumption, pass in Debug, Release, supported ASan+UBSan, and
 clang-tidy configurations. Compiler output is warning-free, formatting passes,
 and strict Doxygen passes. Explicit owner counters supplement sanitizer
 cleanup checks. macOS LeakSanitizer is unsupported and disabled; it is not a
 passed gate. GCC, MSVC, other platforms, and remote generated CI have not run
-locally. No hosting location is selected, and nothing has been published.
+locally. These local results do not establish remote CI or package publication.
 
 The final integrated correction adds depth-12000 executable retirement
 regressions and rejects higher-order foreign result ownership before effects
 or raw preparation. Runtime-managed literals, array/tuple children, and lazy
 bodies retire through one nonallocating last-owner worklist; shared code and
-invocation guards retain their original semantics. The session's
-`final-fix-wave-report.md` records the corrected package inputs and RED/GREEN
-evidence.
+invocation guards retain their original semantics.
+The shipped `tests/executable_retirement_test.cpp` and `tests/callable_test.cpp`
+retain the corresponding regressions. Use the Debug, Release, and sanitizer
+commands on this page to reproduce them against this checkout, then install
+normal and instrumented packages separately for parser validation.
+
+The API correction adds `native_contract_test`, bringing the suite to 17 CTests.
+It covers `native_type<T>()`, cached `origin_below(count)` boundaries, and
+result-first `op1<R, A>`, `op2<R, A, B>`, and `op3<R, A, B, C>` helpers.
