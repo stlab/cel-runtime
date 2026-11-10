@@ -37,8 +37,9 @@ Callable parameter admission is narrower; see
 
 `dyn_segment` validates instruction composition before publication.
 `op<R, Args...>` accepts arbitrary arity with exact callback parameter and
-result identities after cv/reference removal. Dynamic `op1<A, R>`,
-`op2<A, B, R>`, and `op3<A, B, C, R>` list operands before the result.
+result identities after cv/reference removal. Dynamic `op1<R, A>`,
+`op2<R, A, B>`, and `op3<R, A, B, C>` list the result first, followed by
+source-ordered operands.
 Callbacks consume older-first operands and return independently owned results.
 Generic callbacks need a deduction-proven exact specialization; ambiguous
 const member overloads use `with_signature<Return(Parameters...)>`.
