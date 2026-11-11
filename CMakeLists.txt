@@ -2,8 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 include(cmake/CPM.cmake)
 
-# Supply the unreleased package version until the repository has release tags.
-set(CPP_LIBRARY_VERSION "0.0.0" CACHE STRING "CEL runtime package version")
+set(CPP_LIBRARY_VERSION "" CACHE STRING "CEL runtime package version override")
 
 # Fetch cpp-library before project()
 CPMAddPackage("gh:stlab/cpp-library#b0b096964a93561c7dd1586fa7b0efdf5f077aab")
