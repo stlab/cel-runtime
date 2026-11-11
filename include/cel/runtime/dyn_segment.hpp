@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSL-1.0
 #ifndef CEL_RUNTIME_DYN_SEGMENT_HPP
 #define CEL_RUNTIME_DYN_SEGMENT_HPP
-#include <cel/runtime/raw_segment.hpp>
+#include <cel/runtime/detail/raw_segment.hpp>
 #include <concepts>
 #include <new>
 #include <optional>
@@ -22,7 +22,9 @@ inline bool operator==(const stack_origin& left, const stack_origin& right) noex
     return left.bytes == right.bytes && left.depth == right.depth;
 }
 class compiled_segment;
+namespace detail {
 class prepared_raw_segment;
+}
 template <class R, class... Args>
 class prepared_segment;
 
@@ -220,7 +222,7 @@ requires(detail::signature_binding<Signature, std::decay_t<F>>::available) auto 
 /// Example: `dyn_segment b; b.just(value::from(2.0)); auto p = std::move(b).finish();`.
 /// See the runtime.hpp example for complete construction, preparation, reservation, and execution.
 class dyn_segment {
-    raw_segment _body;
+    detail::raw_segment _body;
     std::vector<value_type> _stack;
     std::vector<detail::argument_read> _reads;
     std::vector<std::size_t> _end_cursors; ///< Mirrors canonical cursor ends in _stack order.
@@ -431,7 +433,7 @@ public:
         }();
         const auto effect = check_operation(inputs, outputs);
         _body.template push_op<R, Args...>(
-            [callback = std::forward<F>(callback)](frame&, Args&&... operands) -> R {
+            [callback = std::forward<F>(callback)](detail::frame&, Args&&... operands) -> R {
                 return std::invoke(callback, std::move(operands)...);
             });
         apply_operation(sizeof...(Args), outputs, effect);
@@ -482,7 +484,7 @@ public:
 /// Captures are never copied as independent values; external referenced state stays caller-owned.
 /// Moves between distinct handles leave the source without code; assign a live handle before
 /// using borrowed accessors.
-/// Borrowed results, requirements, and read views remain valid while unchanged code ownership
+/// Borrowed result types and requirements remain valid while unchanged code ownership
 /// retains them. Execution requires exclusive access to its stack and any mutable callback state.
 /// Last ownership retires managed captures and nested executable bodies without allocation or
 /// nesting-dependent stack. Arbitrary client capture destructors retain their own costs.
@@ -495,6 +497,16 @@ class compiled_segment {
     /// Retains a fully checked frozen engine.
     explicit compiled_segment(
         detail::retirement_ptr<const detail::frozen_program> program) noexcept;
+
+    /// Binds complete runtime shapes and ownership plans once.
+    /// Retains copied argument/result descriptors and frozen code, not the supplied spans.
+    /// Checks only emitted argument positions; unused descriptors need not support ownership.
+    /// Throws invalid_argument for dependent origin, undeclared reads, types, or absent ownership.
+    /// Throws std::logic_error for a moved-from handle.
+    /// Complexity: O(arguments + distinct compared metadata pairs) time and binding space.
+    /// Example: `auto bound = program.prepare_raw(types, program.result_type());`.
+    detail::prepared_raw_segment prepare_raw(std::span<const value_type> arguments,
+                                             const value_type& result) const;
 
 public:
     /// Disallows misleading independent capture copies.
@@ -517,23 +529,6 @@ public:
     /// Arbitrary callback/nested costs are not inferred; use for_prefix before reserving.
     /// Example: `auto r = program.requirements().for_prefix(stack.cursor(), stack.depth());`.
     const stack_requirements& requirements() const noexcept;
-    /// Returns the retained ambient origin; nonzero byte or depth origins are dependent.
-    /// Precondition: this handle is live.
-    /// Example: `program.origin() == stack_origin{}`.
-    stack_origin origin() const noexcept;
-    /// Borrows one requirement per distinct emitted argument index; absent inputs are unused.
-    /// Each entry exposes index (the source-order argument position) and type (the complete
-    /// descriptor). Entries are read declarations, not a dense positional argument array.
-    /// Precondition: this handle has not been moved from.
-    /// The view borrows frozen code; copy descriptors to keep metadata independently.
-    /// Inspect entries without naming their implementation type:
-    /// @code
-    /// for (const auto& read : program.argument_reads()) {
-    ///     auto position = read.index;
-    ///     auto required_type = read.type; // Retains metadata independently.
-    /// }
-    /// @endcode
-    std::span<const detail::argument_read> argument_reads() const noexcept;
     /// Validates all actual read witnesses before effects and returns an independent owner.
     /// Extra unused inputs are permitted and are not materialized.
     /// Borrows arguments for the call; callbacks must not mutate their owners or owned payloads.
@@ -545,26 +540,18 @@ public:
     /// Complexity: O(read validation + executed instructions + payload work) time and result space.
     /// Example: `auto result = program.execute(stack, inputs);`.
     value execute(raw_stack& stack, std::span<const value> arguments) const;
-    /// Binds complete runtime shapes and ownership plans once.
-    /// Retains copied argument/result descriptors and frozen code, not the supplied spans.
-    /// Checks only emitted argument positions; unused descriptors need not support ownership.
-    /// Throws invalid_argument for dependent origin, undeclared reads, types, or absent ownership.
-    /// Throws std::logic_error for a moved-from handle.
-    /// Complexity: O(arguments + distinct compared metadata pairs) time and binding space.
-    /// Example: `auto bound = program.prepare_raw(types, program.result_type());`.
-    prepared_raw_segment prepare_raw(std::span<const value_type> arguments,
-                                     const value_type& result) const;
     /// Binds exact recursive concrete adapters once, admitting valid client leaves at roots.
     /// R must not be void; use std::tuple<> for a source-unit result.
     /// Unused declared arguments are accepted and are not converted during calls.
     /// Throws invalid_argument for incompatible argument/result shapes or undeclared reads.
-    /// Follows prepare_raw's dependent-origin and moved-from errors.
+    /// Throws invalid_argument for a dependent origin and logic_error for a moved-from handle.
     /// Complexity: O(arity + distinct compared metadata pairs) time and binding space.
     /// Example: `auto bound = program.prepare<double, double>();`.
     template <class R, class... Args>
     prepared_segment<R, Args...> prepare() const;
 };
 
+namespace detail {
 /// Retains a move-only, reference-semantic frozen canonical execution binding.
 /// No call compares descriptors, converts operands, or allocates scalar public owner boxes.
 /// Referenced callback state remains caller-owned and supplies its own synchronization.
@@ -572,33 +559,16 @@ public:
 /// After moving, use the source only for destruction or assignment, including after self-move.
 /// Destruction releases retained code and metadata.
 /// Complexity: last release takes O(released code nodes/edges + metadata + client destructor work).
-///
-/// Supply native leaf bytes, then retire the successful result before releasing its buffer:
-/// @code
-/// cel::dyn_segment builder;
-/// builder.push_argument(0, cel::native_type<double>());
-/// auto program = std::move(builder).finish();
-/// const auto type = cel::native_type<double>();
-/// auto bound = program.prepare_raw(std::array{type}, type);
-/// double input = 2.0;
-/// const std::array inputs{
-///     cel::borrowed_value{type, reinterpret_cast<const std::byte*>(&input)}};
-/// alignas(double) std::array<std::byte, sizeof(double)> result_bytes{};
-/// cel::raw_stack stack;
-/// bound.call_into(stack, inputs, result_bytes.data());
-/// auto result = std::bit_cast<double>(result_bytes); // 2.0.
-/// bound.destroy_result(result_bytes.data());
-/// @endcode
 class prepared_raw_segment {
     detail::retirement_ptr<const detail::frozen_program> _program;
     std::vector<value_type> _arguments;
     value_type _result;
     std::vector<bool> _used;
     value_type _unit;
-    friend class compiled_segment;
-    friend struct detail::segment_access;
+    friend class cel::compiled_segment;
+    friend struct segment_access;
     template <class R, class... Args>
-    friend class prepared_segment;
+    friend class cel::prepared_segment;
     /// Retains a validated frozen signature.
     /// Complexity: O(argument count) time and binding space.
     prepared_raw_segment(detail::retirement_ptr<const detail::frozen_program> program,
@@ -654,7 +624,6 @@ public:
     void destroy_result(std::byte* result) const noexcept;
 };
 
-namespace detail {
 /// Borrows canonical bytes from a public owner without exposing its private payload.
 const std::byte* canonical_data(const value& source) noexcept;
 /// Borrows a native leaf or owns a used composite's trusted canonical conversion.
@@ -721,10 +690,11 @@ public:
 /// See the runtime.hpp example for a complete typed call and stack reservation.
 template <class R, class... Args>
 class prepared_segment {
-    prepared_raw_segment _binding;
+    detail::prepared_raw_segment _binding;
     friend class compiled_segment;
     /// Transfers a complete construction-validated binding.
-    explicit prepared_segment(prepared_raw_segment binding) : _binding(std::move(binding)) {}
+    explicit prepared_segment(detail::prepared_raw_segment binding) :
+        _binding(std::move(binding)) {}
     /// Converts only emitted composite reads, retaining unused inputs as empty source unit.
     /// Complexity: O(arity + read payload size) time and canonical input space.
     template <std::size_t... I>
@@ -737,9 +707,9 @@ class prepared_segment {
     template <std::size_t... I>
     auto borrow(const std::tuple<detail::typed_input<Args>...>& inputs,
                 std::index_sequence<I...>) const {
-        return std::array<borrowed_value, sizeof...(Args)>{
+        return std::array<detail::borrowed_value, sizeof...(Args)>{
             (_binding._used[I] ? std::get<I>(inputs).borrow(_binding.argument_types()[I]) :
-                                 borrowed_value{_binding._unit, nullptr})...};
+                                 detail::borrowed_value{_binding._unit, nullptr})...};
     }
 
 public:

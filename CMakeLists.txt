@@ -21,12 +21,12 @@ include(CTest)
 
 # Setup library
 cpp_library_setup(
-    DESCRIPTION "Owned values, canonical layouts, and explicit raw execution for CEL"
+    DESCRIPTION "Checked CEL programs, owned values, and reusable execution stacks"
     NAMESPACE cel
     REQUIRES_CPP_VERSION 20
-    HEADERS runtime.hpp runtime/layout.hpp runtime/value_type.hpp runtime/value.hpp runtime/raw_stack.hpp runtime/raw_segment.hpp runtime/dyn_segment.hpp runtime/segment.hpp runtime/callable.hpp runtime/detail/retirement.hpp
+    HEADERS runtime.hpp runtime/layout.hpp runtime/value_type.hpp runtime/value.hpp runtime/raw_stack.hpp runtime/dyn_segment.hpp runtime/callable.hpp runtime/detail/retirement.hpp runtime/detail/frame.hpp runtime/detail/raw_segment.hpp
     SOURCES storage.cpp value_type.cpp value.cpp raw_stack.cpp raw_segment.cpp dyn_segment.cpp callable.cpp
-    TESTS storage_test.cpp value_test.cpp resource_test.cpp raw_execution_test.cpp segment_test.cpp composite_execution_test.cpp callable_test.cpp executable_retirement_test.cpp native_contract_test.cpp nontrivial_leaf_fail.cpp typed_operand_fail.cpp static_operand_fail.cpp overloaded_operand_fail.cpp generic_conversion_fail.cpp nondeduced_generic_fail.cpp
+    TESTS storage_test.cpp value_test.cpp resource_test.cpp raw_execution_test.cpp segment_test.cpp composite_execution_test.cpp callable_test.cpp executable_retirement_test.cpp native_contract_test.cpp nontrivial_leaf_fail.cpp typed_operand_fail.cpp overloaded_operand_fail.cpp generic_conversion_fail.cpp nondeduced_generic_fail.cpp raw_interface_fail.cpp alignment_interface_fail.cpp program_metadata_fail.cpp
     EXAMPLES getting_started.cpp
     DOCS_INPUTS README.md docs/get-started.md docs/execution.md docs/parity.md docs/runtime-milestone.md
     DOCS_OPTIONS "USE_MDFILE_AS_MAINPAGE = ${CMAKE_CURRENT_SOURCE_DIR}/README.md"
@@ -71,6 +71,11 @@ if(TARGET segment_test)
     target_include_directories(segment_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     set_tests_properties(segment_test PROPERTIES TIMEOUT 30)
 endif()
+foreach(test callable_test executable_retirement_test)
+    if(TARGET ${test})
+        target_include_directories(${test} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    endif()
+endforeach()
 if(TARGET composite_execution_test)
     target_include_directories(composite_execution_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     set_tests_properties(composite_execution_test PROPERTIES TIMEOUT 30)

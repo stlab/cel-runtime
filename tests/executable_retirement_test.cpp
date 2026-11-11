@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BSL-1.0
+#include "instruction.hpp"
 #include <cel/runtime.hpp>
 #include <exception>
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
@@ -90,10 +91,12 @@ TEST_CASE("array tuple and executable ownership edges share one retirement opera
 
 TEST_CASE("deep lazy code retained by a prepared binding retires on its last release") {
     auto program = lazy_chain(12000);
-    auto prepared = program.prepare_raw({}, cel::value_type::leaf<bool>());
+    auto prepared =
+        cel::detail::segment_access::prepare_raw(program, {}, cel::value_type::leaf<bool>());
     cel::dyn_segment empty;
     auto replacement = std::move(empty).finish();
-    auto replacement_binding = replacement.prepare_raw({}, cel::value_type{});
+    auto replacement_binding =
+        cel::detail::segment_access::prepare_raw(replacement, {}, cel::value_type{});
     program = std::move(replacement);
     CHECK_NOTHROW(prepared = std::move(replacement_binding));
 }

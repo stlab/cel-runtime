@@ -2,8 +2,8 @@
 #ifndef CEL_RUNTIME_RAW_SEGMENT_HPP
 #define CEL_RUNTIME_RAW_SEGMENT_HPP
 #include <array>
+#include <cel/runtime/detail/frame.hpp>
 #include <cel/runtime/detail/retirement.hpp>
-#include <cel/runtime/raw_stack.hpp>
 #include <concepts>
 #include <functional>
 #include <memory>
@@ -11,11 +11,9 @@
 #include <type_traits>
 #include <utility>
 
-namespace cel {
-namespace detail {
+namespace cel::detail {
 struct instruction_storage;
 struct segment_access;
-} // namespace detail
 /// Owns a move-only stored operation sequence and stable, correctly constructed captures.
 /// Execution is const; construction and movement require exclusive access.
 /// Trusted-program precondition: every instruction finds its complete ordered signature
@@ -183,5 +181,5 @@ public:
         push_op<R, A, B, C>(std::forward<F>(callback));
     }
 };
-} // namespace cel
+} // namespace cel::detail
 #endif

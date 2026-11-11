@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSL-1.0
+#include "instruction.hpp"
 #include "type_ops.hpp"
 #include "value_ops.hpp"
 #include <cel/runtime/dyn_segment.hpp>
-#include <cel/runtime/segment.hpp>
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <array>
@@ -32,12 +32,6 @@ void destroy_carrier(std::byte* bytes) noexcept {
 }
 /// Supplies an incompatible ownership pair with the same semantic signature.
 void destroy_other_carrier(std::byte* bytes) noexcept { destroy_carrier(bytes); }
-
-/// Detects whether a final static stack admits standalone finalization.
-template <class T>
-concept finishable = requires(T builder) {
-    std::move(builder).finish();
-};
 
 /// Exercises root admission independently of callable-parameter restrictions.
 struct alignas(256) client_leaf {
@@ -244,13 +238,11 @@ struct adaptable_factor {
     double operator()(double input) const { return factor * input; }
 };
 
-TEST_CASE("dynamic static and selected callbacks copy nonmovable lvalues independently") {
+TEST_CASE("dynamic and selected callbacks copy nonmovable lvalues independently") {
     copy_only_factor callback(3.0);
     cel::dyn_segment dynamic;
     dynamic.just(cel::value::from(2.0));
     dynamic.op1<double, double>(callback);
-    cel::segment<cel::type_list<double>> typed;
-    auto scaled = std::move(typed).op1<double>(callback);
     auto selected = cel::with_signature<double(double)>(callback);
     cel::dyn_segment explicit_signature;
     explicit_signature.just(cel::value::from(4.0));
@@ -258,7 +250,6 @@ TEST_CASE("dynamic static and selected callbacks copy nonmovable lvalues indepen
     callback.factor = 99.0;
     cel::raw_stack stack;
     CHECK(std::move(dynamic).finish().prepare<double>().call(stack) == 6.0);
-    CHECK(std::move(scaled).finish().prepare<double, double>().call(stack, 5.0) == 15.0);
     CHECK(std::move(explicit_signature).finish().prepare<double>().call(stack) == 12.0);
 }
 
@@ -304,30 +295,6 @@ TEST_CASE("valid over-aligned client root arguments and results are admitted") {
     CHECK(prepared.call(stack, client_leaf{41}).number == 42);
 }
 
-TEST_CASE("static initial operands retain source order and type flow") {
-    cel::segment<cel::type_list<double, bool, double>> builder;
-    auto operation = std::move(builder).op3<double>(
-        [](double a, bool b, double c) { return b ? a - c : c - a; });
-    auto prepared = std::move(operation).finish().prepare<double, double, bool, double>();
-    cel::raw_stack stack;
-    CHECK(prepared.call(stack, 10.0, true, 2.0) == 8.0);
-    cel::segment<cel::type_list<double>> identity;
-    CHECK(std::move(identity).finish().prepare<double, double>().call(stack, 6.0) == 6.0);
-    cel::segment<cel::type_list<>> empty;
-    CHECK(std::move(empty).finish().prepare<std::tuple<>>().call(stack) == std::tuple<>{});
-}
-
-TEST_CASE("static pushes unary binary arbitrary arity and void source unit") {
-    cel::segment<cel::type_list<double>> builder;
-    auto unary = std::move(builder).op1<bool>([](double n) { return n > 0.0; });
-    auto pushed = std::move(unary).op0<double>([] { return 3.0; });
-    auto binary = std::move(pushed).op2<double>([](bool b, double n) { return b ? n : -n; });
-    auto consumed = std::move(binary).op<void, double>([](double) {});
-    cel::raw_stack stack;
-    CHECK(std::move(consumed).finish().prepare<std::tuple<>, double>().call(stack, 2.0) ==
-          std::tuple<>{});
-}
-
 TEST_CASE("finalization rejects silent leftover operand discard") {
     cel::dyn_segment builder;
     builder.just(cel::value::from(true));
@@ -340,18 +307,18 @@ TEST_CASE("runtime-bound owning output has a public retirement boundary") {
     builder.op0<std::vector<std::vector<double>>>(
         [] { return std::vector<std::vector<double>>{{2.0}, {3.0}}; });
     auto program = std::move(builder).finish();
-    auto prepared = program.prepare_raw({}, program.result_type());
+    auto prepared = cel::detail::segment_access::prepare_raw(program, {}, program.result_type());
     const auto layout = prepared.result_type().byte_layout();
     auto* destination =
         static_cast<std::byte*>(::operator new(layout.size, std::align_val_t(layout.alignment)));
     cel::raw_stack stack;
     prepared.call_into(stack, {}, destination);
-    auto first = cel::borrowed_value{prepared.result_type(), destination}
+    auto first = cel::detail::borrowed_value{prepared.result_type(), destination}
                      .as<std::vector<std::vector<double>>>();
     prepared.destroy_result(destination);
     first[0][0] = 8.0;
     prepared.call_into(stack, {}, destination);
-    CHECK(cel::borrowed_value{prepared.result_type(), destination}
+    CHECK(cel::detail::borrowed_value{prepared.result_type(), destination}
               .as<std::vector<std::vector<double>>>()[0][0] == 2.0);
     prepared.destroy_result(destination);
     ::operator delete(destination, std::align_val_t(layout.alignment));
@@ -365,12 +332,14 @@ TEST_CASE("runtime-bound exact record identity and shared deep metadata") {
     builder.push_argument(0, type);
     auto program = std::move(builder).finish();
     const std::array wrong{cel::value_type::record("other", fields)};
-    CHECK_THROWS_AS(program.prepare_raw(wrong, type), std::invalid_argument);
+    CHECK_THROWS_AS(cel::detail::segment_access::prepare_raw(program, wrong, type),
+                    std::invalid_argument);
     const std::array arguments{type};
-    auto prepared = program.prepare_raw(arguments, type);
+    auto prepared = cel::detail::segment_access::prepare_raw(program, arguments, type);
     const std::array contents{cel::value::from(true)};
     auto source = cel::value::record(type, contents);
-    const std::array views{cel::borrowed_value{type, cel::detail::value_access::data(source)}};
+    const std::array views{
+        cel::detail::borrowed_value{type, cel::detail::value_access::data(source)}};
     alignas(bool) std::array<std::byte, sizeof(bool)> result{};
     cel::raw_stack stack;
     prepared.call_into(stack, views, result.data());
@@ -388,7 +357,7 @@ TEST_CASE("runtime-bound exact record identity and shared deep metadata") {
     shared.push_argument(0, deep);
     auto shared_program = std::move(shared).finish();
     const std::array shared_arguments{same};
-    CHECK_NOTHROW(shared_program.prepare_raw(shared_arguments, same));
+    CHECK_NOTHROW(cel::detail::segment_access::prepare_raw(shared_program, shared_arguments, same));
 }
 
 TEST_CASE("throwing callbacks preserve caller prefix and reusable raw destination") {
@@ -401,13 +370,13 @@ TEST_CASE("throwing callbacks preserve caller prefix and reusable raw destinatio
     });
     auto program = std::move(builder).finish();
     const std::array types{cel::value_type::leaf<double>()};
-    auto prepared = program.prepare_raw(types, types[0]);
+    auto prepared = cel::detail::segment_access::prepare_raw(program, types, types[0]);
     cel::raw_stack stack;
     stack.push(std::vector{7.0});
     const auto cursor = stack.cursor();
     double input = 2.0;
     const std::array views{
-        cel::borrowed_value{types[0], reinterpret_cast<const std::byte*>(&input)}};
+        cel::detail::borrowed_value{types[0], reinterpret_cast<const std::byte*>(&input)}};
     alignas(double) std::array<std::byte, sizeof(double)> result{};
     result.fill(std::byte{0x5a});
     CHECK_THROWS_AS(prepared.call_into(stack, views, result.data()), std::runtime_error);
@@ -416,7 +385,7 @@ TEST_CASE("throwing callbacks preserve caller prefix and reusable raw destinatio
     CHECK(stack.cursor() == cursor);
     fail = false;
     prepared.call_into(stack, views, result.data());
-    CHECK(cel::borrowed_value{types[0], result.data()}.as<double>() == 3.0);
+    CHECK(cel::detail::borrowed_value{types[0], result.data()}.as<double>() == 3.0);
     prepared.destroy_result(result.data());
     CHECK(stack.pop<std::vector<double>>() == std::vector<double>{7.0});
 }
@@ -439,7 +408,7 @@ TEST_CASE("reserved typed and runtime-bound scalar calls reuse the stack") {
     auto program = std::move(builder).finish();
     auto typed = program.prepare<double, double>();
     const std::array types{cel::value_type::leaf<double>()};
-    auto raw = program.prepare_raw(types, types[0]);
+    auto raw = cel::detail::segment_access::prepare_raw(program, types, types[0]);
     cel::raw_stack stack;
     const auto reservation = typed.requirements().for_prefix(stack.cursor(), stack.depth());
     stack.reserve(reservation.bytes.size, reservation.bytes.alignment);
@@ -447,7 +416,7 @@ TEST_CASE("reserved typed and runtime-bound scalar calls reuse the stack") {
     CHECK(typed.call(stack, 5.0) == 2.0);
     double input = 8.0;
     const std::array views{
-        cel::borrowed_value{types[0], reinterpret_cast<const std::byte*>(&input)}};
+        cel::detail::borrowed_value{types[0], reinterpret_cast<const std::byte*>(&input)}};
     alignas(double) std::array<std::byte, sizeof(double)> bytes{};
     raw.call_into(stack, views, bytes.data());
     raw.destroy_result(bytes.data());
@@ -498,9 +467,11 @@ TEST_CASE("raw calls preserve composite arguments and caller prefix") {
         });
     auto program = std::move(builder).finish();
     const std::array types{type};
-    auto bound = program.prepare_raw(types, cel::value_type::leaf<double>());
+    auto bound =
+        cel::detail::segment_access::prepare_raw(program, types, cel::value_type::leaf<double>());
     const auto owner = cel::value::from(std::vector{2.0});
-    const std::array views{cel::borrowed_value{type, cel::detail::value_access::data(owner)}};
+    const std::array views{
+        cel::detail::borrowed_value{type, cel::detail::value_access::data(owner)}};
     cel::raw_stack stack;
     stack.reserve(4096, 256);
     stack.push(std::vector{9.0});
@@ -508,7 +479,7 @@ TEST_CASE("raw calls preserve composite arguments and caller prefix") {
     alignas(double) std::array<std::byte, sizeof(double)> bytes{};
     CHECK(effects == 0);
     bound.call_into(stack, views, bytes.data());
-    CHECK(cel::borrowed_value{bound.result_type(), bytes.data()}.as<double>() == 4.0);
+    CHECK(cel::detail::borrowed_value{bound.result_type(), bytes.data()}.as<double>() == 4.0);
     bound.destroy_result(bytes.data());
     CHECK(effects == 1);
     CHECK(owner.as<std::vector<double>>() == std::vector{2.0});
@@ -537,10 +508,12 @@ TEST_CASE("frozen raw callable results bind complete ownership and retire indepe
         cel::dyn_segment builder;
         builder.just(std::move(literal));
         auto program = std::move(builder).finish();
-        CHECK_THROWS_AS(program.prepare_raw({}, incompatible), std::invalid_argument);
-        CHECK_THROWS_AS(program.prepare_raw({}, cel::value_type::array(signature)),
+        CHECK_THROWS_AS(cel::detail::segment_access::prepare_raw(program, {}, incompatible),
                         std::invalid_argument);
-        auto bound = program.prepare_raw({}, composite);
+        CHECK_THROWS_AS(cel::detail::segment_access::prepare_raw(program, {},
+                                                                 cel::value_type::array(signature)),
+                        std::invalid_argument);
+        auto bound = cel::detail::segment_access::prepare_raw(program, {}, composite);
         const auto layout = composite.byte_layout();
         auto* result = static_cast<std::byte*>(
             ::operator new(layout.size, std::align_val_t(layout.alignment)));
@@ -572,7 +545,8 @@ TEST_CASE("checked callable read pairs and range identities reject before effect
     CHECK_THROWS_AS(builder.push_argument(0, other), std::invalid_argument);
     auto program = std::move(builder).finish();
     const std::array wrong_types{other};
-    CHECK_THROWS_AS(program.prepare_raw(wrong_types, type), std::invalid_argument);
+    CHECK_THROWS_AS(cel::detail::segment_access::prepare_raw(program, wrong_types, type),
+                    std::invalid_argument);
     int number = 3;
     int* pointer = &number;
     alignas(void*) std::array<std::byte, sizeof(pointer)> bytes{};
@@ -588,10 +562,11 @@ TEST_CASE("checked callable read pairs and range identities reject before effect
     auto range_program = std::move(ranges).finish();
     const std::array wrong_range{
         cel::value_type::range(cel::range_kind::range_full, cel::value_type::leaf<bool>())};
-    CHECK_THROWS_AS(range_program.prepare_raw(wrong_range, range), std::invalid_argument);
+    CHECK_THROWS_AS(cel::detail::segment_access::prepare_raw(range_program, wrong_range, range),
+                    std::invalid_argument);
     const std::array right_range{range};
-    auto bound = range_program.prepare_raw(right_range, range);
-    const std::array range_input{cel::borrowed_value{range, nullptr}};
+    auto bound = cel::detail::segment_access::prepare_raw(range_program, right_range, range);
+    const std::array range_input{cel::detail::borrowed_value{range, nullptr}};
     CHECK_NOTHROW(bound.call_into(stack, range_input, nullptr));
     bound.destroy_result(nullptr);
     CHECK(stack.depth() == 0);
@@ -605,8 +580,8 @@ TEST_CASE("zero-byte non-unit raw arguments retain complete recursive identity")
     auto program = std::move(builder).finish();
     CHECK_THROWS_AS((program.prepare<std::tuple<>, zero>()), std::invalid_argument);
     const std::array types{type};
-    auto bound = program.prepare_raw(types, type);
-    const std::array inputs{cel::borrowed_value{type, nullptr}};
+    auto bound = cel::detail::segment_access::prepare_raw(program, types, type);
+    const std::array inputs{cel::detail::borrowed_value{type, nullptr}};
     cel::raw_stack stack;
     CHECK_NOTHROW(bound.call_into(stack, inputs, nullptr));
     bound.destroy_result(nullptr);
@@ -625,20 +600,6 @@ TEST_CASE("ordinary callbacks execute outside acquisition and retirement gates")
     auto bound = std::move(builder).finish().prepare<double, double>();
     CHECK(bound.call(stack, 3.0) == 7.0);
     CHECK(stack.pop<std::vector<double>>() == std::vector<double>{9.0});
-}
-
-TEST_CASE("static finalization and template ascription cannot erase live operands") {
-    using two = cel::segment<cel::type_list<double, bool>>;
-    using one = cel::segment<cel::type_list<double, bool>, cel::type_list<bool>>;
-    static_assert(!finishable<two>);
-    static_assert(!std::default_initializable<one>);
-    static_assert(!std::constructible_from<one, two>);
-    cel::segment<cel::type_list<double, double, bool, double>> builder;
-    auto combined = std::move(builder).op<double, double, double, bool, double>(
-        [](double a, double b, bool flag, double c) { return flag ? a + b - c : 0.0; });
-    cel::raw_stack stack;
-    CHECK(std::move(combined).finish().prepare<double, double, double, bool, double>().call(
-              stack, 10.0, 4.0, true, 2.0) == 12.0);
 }
 
 TEST_CASE("typed composite results retain caller prefix") {
@@ -785,7 +746,7 @@ TEST_CASE("published reservations cover hidden intermediate alignment and caller
     CHECK(requirements.frame_extent == 512);
     CHECK(requirements.live_slots == 2);
     auto typed = program.prepare<double>();
-    auto raw = program.prepare_raw({}, program.result_type());
+    auto raw = cel::detail::segment_access::prepare_raw(program, {}, program.result_type());
     CHECK(&typed.requirements() == &program.requirements());
     CHECK(&raw.requirements() == &program.requirements());
     cel::raw_stack stack;
@@ -866,7 +827,7 @@ TEST_CASE("published reservations check prefix arithmetic and reject constructio
     wide.push_argument(0, huge);
     CHECK_THROWS_AS(wide.push_argument(1, huge), std::overflow_error);
     auto frozen = std::move(wide).finish();
-    CHECK(frozen.argument_reads().size() == 1);
+    CHECK_NOTHROW(cel::detail::segment_access::prepare_raw(frozen, std::array{huge}, huge));
     CHECK(frozen.requirements().frame_extent == huge.byte_layout().size);
     CHECK(frozen.requirements().live_slots == 1);
 }

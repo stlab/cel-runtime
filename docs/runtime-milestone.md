@@ -7,11 +7,11 @@ language parity. The milestone date is 2026-11-06.
 ## Supported package surfaces
 
 Install package `cel-runtime`, include `<cel/runtime.hpp>`, and link
-`cel::runtime`. Public values, complete descriptors, raw stacks/frames, raw
-operation sequences, checked dynamic builders, static stack builders,
-prepared typed/raw calls, and owning callable handles are installed.
-Canonical storage, ownership plans, frame access, and already-entered dispatch
-bridges remain private implementation details.
+`cel::runtime`. Public values, complete descriptors, reusable stacks, checked
+dynamic builders, prepared typed calls, and owning callable handles are installed.
+Raw operation sequences, frames, canonical storage, ownership plans, and raw
+prepared dispatch remain private implementation details. The unused static
+stack builder is not retained.
 
 The checked callable entry spans acquisition through guarded cleanup.
 Semantic declarations remain distinct from runtime ownership-capable witnesses. See

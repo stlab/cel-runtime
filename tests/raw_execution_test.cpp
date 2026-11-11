@@ -3,7 +3,7 @@
 #include "instruction.hpp"
 #include "type_ops.hpp"
 #include "value_ops.hpp"
-#include <cel/runtime/raw_segment.hpp>
+#include <cel/runtime/detail/raw_segment.hpp>
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -26,9 +26,9 @@ TEST_CASE("empty frames and mixed leaves preserve stack order and cursor") {
     cel::raw_stack stack;
     CHECK(stack.depth() == 0);
     CHECK(stack.cursor() == 0);
-    cel::raw_segment empty;
+    cel::detail::raw_segment empty;
     {
-        cel::frame scope(stack);
+        cel::detail::frame scope(stack);
         empty.execute(scope);
         scope.push(true);
         scope.push(4.0);
@@ -42,7 +42,7 @@ TEST_CASE("empty frames and mixed leaves preserve stack order and cursor") {
     CHECK(stack.depth() == 0);
     stack.push(7.0);
     {
-        cel::frame scope(stack);
+        cel::detail::frame scope(stack);
         scope.push(false);
     }
     CHECK(stack.pop<double>() == 7.0);
@@ -51,29 +51,30 @@ TEST_CASE("empty frames and mixed leaves preserve stack order and cursor") {
 /// Verifies source operand order, zero arguments, and extensible arity.
 TEST_CASE("stored operations preserve noncommutative operand order at every arity") {
     cel::raw_stack stack;
-    cel::raw_segment segment;
-    segment.push_op0<double>([](cel::frame&) { return 12.0; });
-    segment.push_op0<double>([](cel::frame&) { return 3.0; });
-    segment.push_op2<double, double, double>([](cel::frame&, double a, double b) { return a / b; });
-    segment.push_op1<double, double>([](cel::frame&, double a) { return a + 1.0; });
-    segment.push_op0<double>([](cel::frame&) { return 2.0; });
-    segment.push_op0<double>([](cel::frame&) { return 1.0; });
+    cel::detail::raw_segment segment;
+    segment.push_op0<double>([](cel::detail::frame&) { return 12.0; });
+    segment.push_op0<double>([](cel::detail::frame&) { return 3.0; });
+    segment.push_op2<double, double, double>(
+        [](cel::detail::frame&, double a, double b) { return a / b; });
+    segment.push_op1<double, double>([](cel::detail::frame&, double a) { return a + 1.0; });
+    segment.push_op0<double>([](cel::detail::frame&) { return 2.0; });
+    segment.push_op0<double>([](cel::detail::frame&) { return 1.0; });
     segment.push_op3<double, double, double, double>(
-        [](cel::frame&, double a, double b, double c) { return a - b - c; });
-    cel::frame scope(stack);
+        [](cel::detail::frame&, double a, double b, double c) { return a - b - c; });
+    cel::detail::frame scope(stack);
     segment.execute(scope);
     CHECK(scope.pop<double>() == 2.0);
-    cel::raw_segment arbitrary;
+    cel::detail::raw_segment arbitrary;
     arbitrary.push_op<double, double, double, double, double, double>(
-        [](cel::frame&, double a, double b, double c, double d, double e) {
+        [](cel::detail::frame&, double a, double b, double c, double d, double e) {
             return a - b - c - d - e;
         });
     for (auto n : {20.0, 1.0, 2.0, 3.0, 4.0})
         scope.push(n);
     arbitrary.execute(scope);
     CHECK(scope.pop<double>() == 10.0);
-    cel::raw_segment unit;
-    unit.push_op0<void>([](cel::frame&) {});
+    cel::detail::raw_segment unit;
+    unit.push_op0<void>([](cel::detail::frame&) {});
     unit.execute(scope);
     CHECK(scope.depth() == 0);
 }
@@ -92,7 +93,7 @@ struct alignas(256) owning_capture {
         if (owner) ++*released;
     }
     /// Returns the captured number, rejecting relocation after the first call.
-    double operator()(cel::frame&) const {
+    double operator()(cel::detail::frame&) const {
         if (address && address != this) throw std::runtime_error("relocated capture");
         if (reinterpret_cast<std::uintptr_t>(this) % alignof(owning_capture) != 0)
             throw std::runtime_error("misaligned capture");
@@ -111,16 +112,16 @@ struct alignas(256) copy_only_capture {
     /// Disallows move construction.
     copy_only_capture(copy_only_capture&&) = delete;
     /// Returns the owned result.
-    double operator()(cel::frame&) const { return number; }
+    double operator()(cel::detail::frame&) const { return number; }
 };
 
 TEST_CASE("raw operations copy nonmovable lvalue captures independently") {
     copy_only_capture input(7.0);
-    cel::raw_segment segment;
+    cel::detail::raw_segment segment;
     segment.push_op0<double>(input);
     input.number = 99.0;
     cel::raw_stack stack;
-    cel::frame scope(stack);
+    cel::detail::frame scope(stack);
     segment.execute(scope);
     CHECK(scope.pop<double>() == 7.0);
 }
@@ -130,17 +131,17 @@ TEST_CASE("captures survive input owners segment growth and segment moves") {
     int released = 0;
     cel::raw_stack stack;
     {
-        cel::raw_segment segment;
+        cel::detail::raw_segment segment;
         segment.push_op0<double>(owning_capture(released));
         {
-            cel::frame scope(stack);
+            cel::detail::frame scope(stack);
             segment.execute(scope);
             CHECK(scope.pop<double>() == 8.0);
         }
         for (int i = 0; i != 200; ++i)
-            segment.push_op0<void>([](cel::frame&) {});
-        cel::raw_segment moved(std::move(segment));
-        cel::frame scope(stack);
+            segment.push_op0<void>([](cel::detail::frame&) {});
+        cel::detail::raw_segment moved(std::move(segment));
+        cel::detail::frame scope(stack);
         moved.execute(scope);
         CHECK(scope.pop<double>() == 8.0);
         CHECK(released == 0);
@@ -152,14 +153,14 @@ TEST_CASE("captures survive input owners segment growth and segment moves") {
 TEST_CASE("reserved scalar execution reuses one stack") {
     cel::raw_stack stack;
     stack.reserve(1024, 256);
-    cel::raw_segment number;
-    number.push_op0<double>([](cel::frame&) { return 6.0; });
-    number.push_op1<double, double>([](cel::frame&, double n) { return n / 2.0; });
-    cel::raw_segment boolean;
-    boolean.push_op0<bool>([](cel::frame&) { return true; });
-    boolean.push_op1<bool, bool>([](cel::frame&, bool n) { return !n; });
+    cel::detail::raw_segment number;
+    number.push_op0<double>([](cel::detail::frame&) { return 6.0; });
+    number.push_op1<double, double>([](cel::detail::frame&, double n) { return n / 2.0; });
+    cel::detail::raw_segment boolean;
+    boolean.push_op0<bool>([](cel::detail::frame&) { return true; });
+    boolean.push_op1<bool, bool>([](cel::detail::frame&, bool n) { return !n; });
     {
-        cel::frame scope(stack);
+        cel::detail::frame scope(stack);
         number.execute(scope);
         CHECK(scope.pop<double>() == 3.0);
         boolean.execute(scope);
@@ -168,7 +169,7 @@ TEST_CASE("reserved scalar execution reuses one stack") {
     bool correct = true;
     {
         for (int i = 0; i != 2000; ++i) {
-            cel::frame scope(stack);
+            cel::detail::frame scope(stack);
             number.execute(scope);
             correct = correct && scope.pop<double>() == 3.0;
             boolean.execute(scope);
@@ -184,19 +185,20 @@ TEST_CASE("nested evaluations preserve outer arguments and live temporaries") {
     cel::raw_stack stack;
     const std::array arguments{cel::value::from(11.0)};
     int context = 7;
-    cel::raw_segment nested;
-    nested.push_op0<double>([](cel::frame& scope) { return scope.argument(0).as<double>(); });
-    cel::raw_segment outer;
-    outer.push_op1<double, double>([&](cel::frame& scope, double input) {
+    cel::detail::raw_segment nested;
+    nested.push_op0<double>(
+        [](cel::detail::frame& scope) { return scope.argument(0).as<double>(); });
+    cel::detail::raw_segment outer;
+    outer.push_op1<double, double>([&](cel::detail::frame& scope, double input) {
         scope.push(5.0);
-        cel::frame inner(stack, scope.arguments(), scope.context());
+        cel::detail::frame inner(stack, scope.arguments(), scope.context());
         nested.execute(inner);
         const auto result = inner.pop<double>();
         CHECK(scope.argument(0).as<double>() == 11.0);
         CHECK(scope.context() == &context);
         return result + input;
     });
-    cel::frame scope(stack, arguments, &context);
+    cel::detail::frame scope(stack, arguments, &context);
     scope.push(3.0);
     outer.execute(scope);
     CHECK(scope.pop<double>() == 14.0);
@@ -228,7 +230,7 @@ TEST_CASE("checked stack boundaries reject underflow type mismatch and active-fr
     CHECK_THROWS_AS(stack.pop<std::uint64_t>(), std::invalid_argument);
     CHECK(stack.depth() == 1);
     {
-        cel::frame scope(stack);
+        cel::detail::frame scope(stack);
         CHECK_THROWS_AS(scope.pop<double>(), std::out_of_range);
         CHECK_THROWS_AS(stack.clear(), std::logic_error);
         CHECK_THROWS_AS(stack.push(true), std::logic_error);
@@ -239,7 +241,7 @@ TEST_CASE("checked stack boundaries reject underflow type mismatch and active-fr
         // NOLINTNEXTLINE(bugprone-use-after-move): rejected move preserves source.
         CHECK_THROWS_AS(destination = std::move(stack), std::logic_error);
         // NOLINTNEXTLINE(bugprone-use-after-move): rejected moves preserve frames.
-        cel::frame inner(stack);
+        cel::detail::frame inner(stack);
         CHECK_THROWS_AS(scope.push(true), std::logic_error);
     }
     CHECK(stack.pop<double>() == 2.0);
@@ -251,11 +253,11 @@ TEST_CASE("zero byte units and over-aligned operations reuse explicitly reserved
     cel::raw_stack stack;
     stack.reserve(1024, 256);
     stack.reserve_depth(200);
-    cel::raw_segment segment;
-    segment.push_op0<aligned_leaf>([](cel::frame&) { return aligned_leaf{13.0}; });
-    segment.push_op0<std::tuple<>>([](cel::frame&) { return std::tuple{}; });
+    cel::detail::raw_segment segment;
+    segment.push_op0<aligned_leaf>([](cel::detail::frame&) { return aligned_leaf{13.0}; });
+    segment.push_op0<std::tuple<>>([](cel::detail::frame&) { return std::tuple{}; });
     {
-        cel::frame scope(stack);
+        cel::detail::frame scope(stack);
         segment.execute(scope);
         CHECK(scope.pop<std::tuple<>>() == std::tuple{});
         CHECK(scope.pop<aligned_leaf>().number == 13.0);
@@ -264,7 +266,7 @@ TEST_CASE("zero byte units and over-aligned operations reuse explicitly reserved
     bool correct = true;
     {
         for (int i = 0; i != 100; ++i) {
-            cel::frame scope(stack);
+            cel::detail::frame scope(stack);
             segment.execute(scope);
             correct = correct && scope.pop<std::tuple<>>() == std::tuple{};
             correct = correct && scope.pop<aligned_leaf>().number == 13.0;
@@ -275,11 +277,11 @@ TEST_CASE("zero byte units and over-aligned operations reuse explicitly reserved
     CHECK(correct);
     int released = 0;
     {
-        cel::raw_segment replaced;
+        cel::detail::raw_segment replaced;
         replaced.push_op0<double>(owning_capture(released));
         replaced = std::move(segment);
         CHECK(released == 1);
-        cel::frame scope(stack);
+        cel::detail::frame scope(stack);
         replaced.execute(scope);
         CHECK(scope.pop<std::tuple<>>() == std::tuple{});
         CHECK(scope.pop<aligned_leaf>().number == 13.0);
@@ -304,9 +306,9 @@ TEST_CASE("canonical instruction captures retain descriptors and clean failed cl
     cel::raw_stack stack;
     stack.push_clone(child);
     {
-        cel::raw_segment sequence;
+        cel::detail::raw_segment sequence;
         cel::detail::segment_access::append(sequence, [owner = std::move(aggregate)](
-                                                          cel::frame& scope) {
+                                                          cel::detail::frame& scope) {
             cel::detail::frame_access::push(
                 scope, owner.type(), cel::detail::value_access::data(owner),
                 [](const void* source, const cel::value_type& type, std::byte* target) {
@@ -314,8 +316,8 @@ TEST_CASE("canonical instruction captures retain descriptors and clean failed cl
                 });
         });
         // A separate matching bridge sequence demonstrates its unchecked signature contract.
-        cel::raw_segment scalar;
-        cel::detail::segment_access::append(scalar, [](cel::frame& scope) {
+        cel::detail::raw_segment scalar;
+        cel::detail::segment_access::append(scalar, [](cel::detail::frame& scope) {
             const auto type = cel::value_type::leaf<double>();
             const auto* operand = cel::detail::frame_access::operand(scope, 0, type);
             double result{};
@@ -323,7 +325,7 @@ TEST_CASE("canonical instruction captures retain descriptors and clean failed cl
             cel::detail::frame_access::discard(scope, 1);
             scope.push(result / 2.0);
         });
-        cel::frame scope(stack);
+        cel::detail::frame scope(stack);
         scope.push(12.0);
         scalar.execute(scope);
         CHECK(scope.pop<double>() == 6.0);
@@ -346,15 +348,16 @@ TEST_CASE("throwing execution and composite cloning preserve the live prefix") {
     auto prefix = cel::value::from(std::vector<std::vector<double>>{{1.0, 2.0}, {3.0}});
     stack.push_take(prefix);
     CHECK(prefix.type().kind() == cel::type_kind::tuple);
-    cel::raw_segment failure;
-    failure.push_op0<std::vector<double>>([](cel::frame&) { return std::vector{7.0, 8.0}; });
+    cel::detail::raw_segment failure;
+    failure.push_op0<std::vector<double>>(
+        [](cel::detail::frame&) { return std::vector{7.0, 8.0}; });
     failure.push_op1<double, std::vector<double>>(
-        [](cel::frame& scope, std::vector<double>) -> double {
+        [](cel::detail::frame& scope, std::vector<double>) -> double {
             scope.push(std::vector{9.0});
             throw std::runtime_error("callback failed");
         });
     {
-        cel::frame scope(stack);
+        cel::detail::frame scope(stack);
         CHECK_THROWS_AS(failure.execute(scope), std::runtime_error);
         CHECK(scope.depth() == 0);
         scope.push(true);
@@ -374,7 +377,7 @@ TEST_CASE("throwing execution and composite cloning preserve the live prefix") {
     const auto baseline = live_resources;
     stack.push(42.0);
     {
-        cel::frame scope(stack);
+        cel::detail::frame scope(stack);
         scope.push_clone(owned);
         clones_before_failure = 1;
         CHECK_THROWS_AS(scope.push_clone(owned), std::runtime_error);
@@ -410,15 +413,16 @@ TEST_CASE("explicit canonical frames clone emitted reads and extract independent
     const auto scalar_type = cel::value_type::leaf<double>();
     double input = 23.0;
     const std::array scalar_arguments{
-        cel::borrowed_value{scalar_type, reinterpret_cast<const std::byte*>(&input)}};
-    cel::raw_segment reads;
-    cel::detail::segment_access::append(reads, [](cel::frame& scope) { scope.push_argument(0); });
+        cel::detail::borrowed_value{scalar_type, reinterpret_cast<const std::byte*>(&input)}};
+    cel::detail::raw_segment reads;
+    cel::detail::segment_access::append(reads,
+                                        [](cel::detail::frame& scope) { scope.push_argument(0); });
     cel::raw_stack stack;
     stack.reserve(1024, 256);
     int context = 5;
     double output = 0;
     {
-        cel::frame scope(stack, scalar_arguments, &context);
+        cel::detail::frame scope(stack, scalar_arguments, &context);
         reads.execute(scope);
         cel::detail::frame_access::release_result(scope, scalar_type,
                                                   reinterpret_cast<std::byte*>(&output));
@@ -429,9 +433,9 @@ TEST_CASE("explicit canonical frames clone emitted reads and extract independent
     bool correct = true;
     {
         for (int i = 0; i != 1000; ++i) {
-            cel::frame scope(stack, scalar_arguments, &context);
+            cel::detail::frame scope(stack, scalar_arguments, &context);
             reads.execute(scope);
-            cel::frame nested(stack, scope.canonical_arguments(), scope.context());
+            cel::detail::frame nested(stack, scope.canonical_arguments(), scope.context());
             reads.execute(nested);
             cel::detail::frame_access::release_result(nested, scalar_type,
                                                       reinterpret_cast<std::byte*>(&output));
@@ -442,9 +446,9 @@ TEST_CASE("explicit canonical frames clone emitted reads and extract independent
 
     auto owner = cel::value::from(std::vector<std::vector<double>>{{1.0, 2.0}});
     const std::array borrowed{
-        cel::borrowed_value{owner.type(), cel::detail::value_access::data(owner)}};
+        cel::detail::borrowed_value{owner.type(), cel::detail::value_access::data(owner)}};
     {
-        cel::frame scope(stack, borrowed);
+        cel::detail::frame scope(stack, borrowed);
         reads.execute(scope);
         auto copy = scope.pop_value();
         copy.set(0, cel::value::from(std::vector{8.0}));
@@ -462,12 +466,12 @@ TEST_CASE("explicit canonical frames clone emitted reads and extract independent
         CHECK(independent.at(0).at(0).as<double>() == 1.0);
         CHECK(owner.at(0).at(0).as<double>() == 6.0);
     }
-    const std::array missing{cel::borrowed_value{scalar_type, nullptr}};
-    CHECK_THROWS_AS(cel::frame(stack, missing), std::invalid_argument);
+    const std::array missing{cel::detail::borrowed_value{scalar_type, nullptr}};
+    CHECK_THROWS_AS(cel::detail::frame(stack, missing), std::invalid_argument);
     alignas(double) std::array<std::byte, sizeof(double) + alignof(double)> unaligned{};
-    const std::array misaligned{cel::borrowed_value{scalar_type, unaligned.data() + 1}};
-    CHECK_THROWS_AS(cel::frame(stack, misaligned), std::invalid_argument);
-    cel::frame scope(stack);
+    const std::array misaligned{cel::detail::borrowed_value{scalar_type, unaligned.data() + 1}};
+    CHECK_THROWS_AS(cel::detail::frame(stack, misaligned), std::invalid_argument);
+    cel::detail::frame scope(stack);
     CHECK(scope.depth() == 0);
 }
 
@@ -487,7 +491,7 @@ TEST_CASE("empty deferred-element arrays retain their legal ownership across raw
 /// Records bounded hook reentry attempts without relying on an invalid raw signature.
 struct reentry_state {
     cel::raw_stack& stack;        ///< Borrows the tested stack.
-    cel::frame* scope;            ///< Borrows the active scope, or null during direct clear.
+    cel::detail::frame* scope;    ///< Borrows the active scope, or null during direct clear.
     int rejected = 0;             ///< Counts documented logic-error rejections.
     bool unexpected = false;      ///< Records any other exception from noexcept destruction probes.
     bool propagate = false;       ///< Lets a clone rejection escape to test rollback.
@@ -505,12 +509,12 @@ struct reentry_state {
             if (propagate) throw;
         }
         try {
-            cel::frame nested(stack);
+            cel::detail::frame nested(stack);
         } catch (const std::logic_error&) {
             ++rejected;
         }
         try {
-            cel::frame nested(stack, std::span<const cel::borrowed_value>{});
+            cel::detail::frame nested(stack, std::span<const cel::detail::borrowed_value>{});
         } catch (const std::logic_error&) {
             ++rejected;
         }
@@ -565,7 +569,7 @@ TEST_CASE("payload clone and noexcept retirement hooks reject reentry") {
     stack.reserve(1024, 256);
     stack.push(17.0);
     {
-        cel::frame scope(stack);
+        cel::detail::frame scope(stack);
         reentry_state attempts{stack, &scope};
         reentry_scope enabled(attempts);
         scope.push_clone(source);
@@ -603,11 +607,11 @@ TEST_CASE("rejected clone reentry rolls back only the frame suffix and restores 
     cel::raw_stack stack;
     stack.reserve(1024, 256);
     stack.push(std::vector{4.0, 5.0});
-    cel::raw_segment sequence;
-    cel::detail::segment_access::append(sequence,
-                                        [&source](cel::frame& scope) { scope.push_clone(source); });
+    cel::detail::raw_segment sequence;
+    cel::detail::segment_access::append(
+        sequence, [&source](cel::detail::frame& scope) { scope.push_clone(source); });
     {
-        cel::frame scope(stack);
+        cel::detail::frame scope(stack);
         scope.push(std::vector{9.0});
         reentry_state attempts{stack, &scope};
         attempts.propagate = true;
@@ -617,7 +621,7 @@ TEST_CASE("rejected clone reentry rolls back only the frame suffix and restores 
         CHECK(scope.depth() == 0);
         scope.push(7.0);
         CHECK(scope.pop<double>() == 7.0);
-        cel::frame nested(stack);
+        cel::detail::frame nested(stack);
         nested.push(false);
         CHECK_FALSE(nested.pop<bool>());
     }
@@ -628,9 +632,9 @@ TEST_CASE("rejected clone reentry rolls back only the frame suffix and restores 
 TEST_CASE("borrowed non-unit zero-byte aggregates preserve complete shape") {
     using aggregate = std::tuple<std::tuple<>, std::tuple<>>;
     const auto type = cel::detail::concrete_adapter<aggregate>::type();
-    const std::array inputs{cel::borrowed_value{type, nullptr}};
+    const std::array inputs{cel::detail::borrowed_value{type, nullptr}};
     cel::raw_stack stack;
-    cel::frame scope(stack, inputs);
+    cel::detail::frame scope(stack, inputs);
     CHECK(type.byte_layout().size == 0);
     CHECK(type.fields().size() == 2);
     CHECK_FALSE(type.same_shape(cel::value_type{}));
@@ -651,7 +655,7 @@ TEST_CASE("scoped canonical acquisition and direct writers contain reentry") {
     stack.reserve(1024, 256);
     stack.push(15.0);
     {
-        cel::frame scope(stack);
+        cel::detail::frame scope(stack);
         scope.push(std::vector{7.0, 8.0});
         const auto type = cel::detail::concrete_adapter<std::vector<double>>::type();
         reentry_state attempts{stack, &scope};
@@ -685,7 +689,7 @@ TEST_CASE("scoped canonical acquisition and direct writers contain reentry") {
         active_reentry = nullptr;
         CHECK(writer.rejected == 3);
         CHECK(scope.pop<double>() == 3.0);
-        cel::frame nested(stack);
+        cel::detail::frame nested(stack);
         nested.push(false);
         CHECK_FALSE(nested.pop<bool>());
     }

@@ -67,7 +67,8 @@ struct branch_instruction {
 void segment_access::retire(cel::compiled_segment& segment, retirement_queue& queue) noexcept {
     segment._program.retire(queue);
 }
-void segment_access::retire(cel::prepared_raw_segment& segment, retirement_queue& queue) noexcept {
+void segment_access::retire(cel::detail::prepared_raw_segment& segment,
+                            retirement_queue& queue) noexcept {
     segment._program.retire(queue);
 }
 const std::byte* canonical_data(const value& source) noexcept { return value_access::data(source); }
@@ -85,6 +86,12 @@ result_storage::~result_storage() {
 }
 } // namespace cel::detail
 namespace cel {
+using detail::align_offset;
+using detail::borrowed_value;
+using detail::frame;
+using detail::prepared_raw_segment;
+using detail::raw_segment;
+
 stack_reservation stack_requirements::for_prefix(std::size_t cursor, std::size_t depth) const {
     return {{detail::checked_add(align_offset(cursor, alignment), frame_extent), alignment},
             detail::checked_add(depth, live_slots)};
@@ -463,14 +470,6 @@ const stack_requirements& compiled_segment::requirements() const noexcept {
     assert(_program);
     return _program->requirements;
 }
-stack_origin compiled_segment::origin() const noexcept {
-    assert(_program);
-    return _program->origin;
-}
-std::span<const detail::argument_read> compiled_segment::argument_reads() const noexcept {
-    assert(_program);
-    return _program->reads;
-}
 value compiled_segment::execute(raw_stack& stack, std::span<const value> arguments) const {
     if (!_program) throw std::logic_error("moved-from compiled program");
     if (_program->origin != stack_origin{}) throw std::invalid_argument("dependent program");
@@ -496,6 +495,11 @@ prepared_raw_segment compiled_segment::prepare_raw(std::span<const value_type> a
         detail::require_ownership(arguments[read.index]);
     }
     return prepared_raw_segment(_program, arguments, result);
+}
+prepared_raw_segment detail::segment_access::prepare_raw(const compiled_segment& program,
+                                                         std::span<const value_type> arguments,
+                                                         const value_type& result) {
+    return program.prepare_raw(arguments, result);
 }
 prepared_raw_segment::prepared_raw_segment(
     detail::retirement_ptr<const detail::frozen_program> program,

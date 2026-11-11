@@ -77,7 +77,7 @@ value_type bind_runtime_ownership(const value_type& type) {
 callable::callable(compiled_segment body, std::span<const value_type> parameters) {
     auto signature = value_type::callable(parameters, body.result_type());
     detail::require_ownership(body.result_type());
-    auto binding = body.prepare_raw(parameters, body.result_type());
+    auto binding = detail::segment_access::prepare_raw(body, parameters, body.result_type());
     signature = detail::type_access::install_callable_ownership(
         signature, {detail::clone_callable, detail::destroy_callable});
     _state = detail::retirement_ptr<detail::callable_state>(
@@ -100,7 +100,7 @@ value callable::call(raw_stack& stack, std::span<const value> arguments) const {
     // Preflight the complete declarations, including parameters the body never reads.
     for (std::size_t i = 0; i != arguments.size(); ++i)
         detail::require_compatible(parameters[i], arguments[i].type());
-    std::vector<borrowed_value> views;
+    std::vector<detail::borrowed_value> views;
     views.reserve(arguments.size());
     for (std::size_t i = 0; i != arguments.size(); ++i)
         views.push_back({parameters[i], detail::value_access::data(arguments[i])});

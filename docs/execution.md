@@ -60,37 +60,11 @@ scalar public owner boxes. Unused composites are not converted. Ordinary root
 programs admit valid client leaves; closure parameter restrictions do not
 narrow root signatures.
 
-`segment<type_list<Args...>>` starts with its declared initial operands.
-Its compile-time stack effects reject wrong operand types and leftover results.
-C++ implements initial operands as owned seeded reads of borrowed call inputs,
-rather than Rust's consuming convenience call.
 Program and prepared handles are move-only and retain reference-semantic frozen
-code. Static `op0<R>` pushes, `op1<R>` replaces the top, and binary/ternary
-operations infer their operand suffix. `R = void` consumes without pushing.
-Static ascription cannot erase initial operands or a dependent origin.
+code.
 
-`layout` describes public byte extents and alignments. `align_offset` rejects
-zero or non-power-of-two alignment and reports rounding overflow. Public
+`layout` describes byte extents and alignments for reservation. Public
 clients do not manage the private aligned storage implementation.
-
-Use `prepare_raw(argument_types, result_type)` only when you can supply trusted
-canonical representations. `prepared_raw_segment::call_into` does no boundary
-conversion or descriptor comparison. Its safety preconditions require:
-
-- A live binding, prepared arity, and complete matching aligned canonical
-  bytes/ownership for each emitted read.
-- Borrowed input extents that outlive the call and do not alias mutated stack
-  or result storage; callbacks do not access a mutable alias.
-- Uninitialized, aligned, disjoint caller-owned output storage of the complete
-  result extent. Null is valid for zero-byte layouts. Unused argument slots may
-  contain source-unit placeholders.
-
-On success, the caller owns one initialized canonical result. Call
-`destroy_result(destination)` exactly once before freeing its outer buffer;
-the binding must outlive retirement. Retirement releases payloads, not the
-caller-owned buffer. On a throwing call, output remains uninitialized:
-do not call `destroy_result`. Native vectors, tuples, and callable objects are
-not raw canonical argument or result bytes.
 
 ## Reserve before entering a frame
 

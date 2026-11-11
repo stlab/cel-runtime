@@ -28,19 +28,11 @@ std::size_t checked_add(std::size_t left, std::size_t right) {
     return left + right;
 }
 
-} // namespace cel::detail
-
-namespace cel {
-
 std::size_t align_offset(std::size_t offset, std::size_t alignment) {
     validate_alignment(alignment);
     const auto remainder = offset % alignment;
     return remainder == 0 ? offset : detail::checked_add(offset, alignment - remainder);
 }
-
-} // namespace cel
-
-namespace cel::detail {
 
 void aligned_delete::operator()(std::byte* data) const noexcept {
     ::operator delete(data, std::align_val_t{alignment});

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BSL-1.0
+#include "instruction.hpp"
 #include "type_ops.hpp"
 #include "value_ops.hpp"
 #include <cel/runtime.hpp>
@@ -430,9 +431,11 @@ TEST_CASE("higher order results reject foreign ownership before checked executio
         CHECK(effects == 0);
         CHECK(stack.depth() == 1);
         CHECK(stack.pop<bool>());
-        CHECK_THROWS_AS(program.prepare_raw(std::array{foreign_outer.type()}, expected),
+        CHECK_THROWS_AS(cel::detail::segment_access::prepare_raw(
+                            program, std::array{foreign_outer.type()}, expected),
                         std::invalid_argument);
-        CHECK_THROWS_AS(program.prepare_raw(std::array{expected}, foreign_outer.type()),
+        CHECK_THROWS_AS(cel::detail::segment_access::prepare_raw(program, std::array{expected},
+                                                                 foreign_outer.type()),
                         std::invalid_argument);
         CHECK(effects == 0);
     }

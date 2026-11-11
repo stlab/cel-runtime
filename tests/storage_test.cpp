@@ -29,24 +29,24 @@ TEST_CASE("layout describes an over-aligned leaf") {
 
 /// Catches incorrect rounding of zero, already-aligned, and unaligned offsets.
 TEST_CASE("align_offset rounds upward without changing aligned offsets") {
-    CHECK(cel::align_offset(0, 64) == 0);
-    CHECK(cel::align_offset(1, 64) == 64);
-    CHECK(cel::align_offset(64, 64) == 64);
-    CHECK(cel::align_offset(65, 64) == 128);
-    CHECK(cel::align_offset(7, 1) == 7);
-    CHECK(cel::align_offset(std::numeric_limits<std::size_t>::max(), 1) ==
+    CHECK(cel::detail::align_offset(0, 64) == 0);
+    CHECK(cel::detail::align_offset(1, 64) == 64);
+    CHECK(cel::detail::align_offset(64, 64) == 64);
+    CHECK(cel::detail::align_offset(65, 64) == 128);
+    CHECK(cel::detail::align_offset(7, 1) == 7);
+    CHECK(cel::detail::align_offset(std::numeric_limits<std::size_t>::max(), 1) ==
           std::numeric_limits<std::size_t>::max());
 }
 
 /// Catches unchecked alignment and offset overflow at the safe boundary.
 TEST_CASE("align_offset rejects invalid alignment and arithmetic overflow") {
-    CHECK_THROWS_AS(cel::align_offset(1, 0), std::invalid_argument);
-    CHECK_THROWS_AS(cel::align_offset(1, 3), std::invalid_argument);
-    CHECK_THROWS_AS(cel::align_offset(std::numeric_limits<std::size_t>::max(), 64),
+    CHECK_THROWS_AS(cel::detail::align_offset(1, 0), std::invalid_argument);
+    CHECK_THROWS_AS(cel::detail::align_offset(1, 3), std::invalid_argument);
+    CHECK_THROWS_AS(cel::detail::align_offset(std::numeric_limits<std::size_t>::max(), 64),
                     std::overflow_error);
     constexpr auto highest = std::numeric_limits<std::size_t>::max() / 2 + 1;
-    CHECK(cel::align_offset(highest, highest) == highest);
-    CHECK_THROWS_AS(cel::align_offset(highest + 1, highest), std::overflow_error);
+    CHECK(cel::detail::align_offset(highest, highest) == highest);
+    CHECK_THROWS_AS(cel::detail::align_offset(highest + 1, highest), std::overflow_error);
 }
 
 /// Catches accidental allocation for zero bytes or forgotten empty-state alignment.

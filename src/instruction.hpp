@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: BSL-1.0
 #ifndef CEL_RUNTIME_INSTRUCTION_HPP
 #define CEL_RUNTIME_INSTRUCTION_HPP
-#include <cel/runtime/raw_segment.hpp>
+#include <cel/runtime/detail/raw_segment.hpp>
 #include <memory_resource>
 #include <vector>
 
 namespace cel {
 class compiled_segment;
-class prepared_raw_segment;
 } // namespace cel
 namespace cel::detail {
+class prepared_raw_segment;
 /// Borrows one arena-owned constructed capture with typed dispatch and destruction.
 struct instruction {
     const void* capture;                   ///< Borrows its stable capture object.
@@ -44,6 +44,10 @@ struct instruction_storage : retirement_node {
 };
 /// Bridges a later checked builder to arbitrary canonical instruction dispatch.
 struct segment_access {
+    /// Binds canonical execution for internal callers; follows the checked preparation contract.
+    static prepared_raw_segment prepare_raw(const compiled_segment& program,
+                                            std::span<const value_type> arguments,
+                                            const value_type& result);
     /// Detaches a mutable operation sequence into the current last-owner worklist.
     static void retire(raw_segment& segment, retirement_queue& queue) noexcept {
         segment._storage.retire(queue);
@@ -51,7 +55,8 @@ struct segment_access {
     /// Detaches a frozen executable handle without destroying descendant captures recursively.
     static void retire(cel::compiled_segment& segment, retirement_queue& queue) noexcept;
     /// Detaches a prepared executable handle while retaining its ordinary metadata cleanup.
-    static void retire(cel::prepared_raw_segment& segment, retirement_queue& queue) noexcept;
+    static void retire(cel::detail::prepared_raw_segment& segment,
+                       retirement_queue& queue) noexcept;
     /// Stores a typed capture without requiring public value operands or fixed arity.
     /// F executes as const F&(frame&); it enforces its trusted complete stack signature.
     /// Its partial-result writers use frame_access and clean failures before publishing.

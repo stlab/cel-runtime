@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSL-1.0
 #include "instruction.hpp"
-#include <cel/runtime/raw_segment.hpp>
+#include <cel/runtime/detail/raw_segment.hpp>
 #include <utility>
 
-namespace cel {
+namespace cel::detail {
 raw_segment::raw_segment() noexcept = default;
 raw_segment::~raw_segment() = default;
 raw_segment::raw_segment(raw_segment&& other) noexcept = default;
@@ -35,4 +35,4 @@ void raw_segment::execute(frame& scope) const {
         throw;
     }
 }
-} // namespace cel
+} // namespace cel::detail

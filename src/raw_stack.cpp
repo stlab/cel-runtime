@@ -13,6 +13,10 @@
 #include <utility>
 
 namespace cel {
+using detail::align_offset;
+using detail::borrowed_value;
+using detail::frame;
+
 namespace {
 /// Rejects missing or misaligned borrowed bytes without traversing metadata.
 void require_bytes(const borrowed_value& input) {

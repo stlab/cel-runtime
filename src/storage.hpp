@@ -7,6 +7,10 @@
 
 namespace cel::detail {
 
+/// Returns the smallest multiple of alignment not less than offset.
+/// Throws invalid_argument for invalid alignment and overflow_error for rounding overflow.
+std::size_t align_offset(std::size_t offset, std::size_t alignment);
+
 /// Returns a checked byte extent or count sum.
 /// Throws std::overflow_error when the sum cannot fit in std::size_t.
 std::size_t checked_add(std::size_t left, std::size_t right);

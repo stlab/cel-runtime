@@ -2,7 +2,7 @@
 #ifndef CEL_RUNTIME_FRAME_HPP
 #define CEL_RUNTIME_FRAME_HPP
 #include "storage.hpp"
-#include <cel/runtime/raw_stack.hpp>
+#include <cel/runtime/detail/frame.hpp>
 #include <vector>
 
 namespace cel::detail {

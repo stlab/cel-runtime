@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BSL-1.0
+#include "storage.hpp"
 #include "type_ops.hpp"
 #include <cel/runtime/value_type.hpp>
 
@@ -292,7 +293,7 @@ value_type& value_type::operator=(const value_type& other) noexcept {
 }
 
 value_type value_type::make_leaf(std::type_index identity, layout bytes) {
-    (void)align_offset(bytes.size, bytes.alignment);
+    (void)detail::align_offset(bytes.size, bytes.alignment);
     auto plan = std::make_shared<detail::type_plan>();
     plan->kind = type_kind::leaf;
     plan->bytes = bytes;
