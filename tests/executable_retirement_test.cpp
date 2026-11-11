@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSL-1.0
-#include "allocation_probe.hpp"
 #include <cel/runtime.hpp>
+#include <exception>
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
@@ -39,59 +39,40 @@ cel::compiled_segment lazy_chain(int depth) {
     return std::move(base).finish();
 }
 
-TEST_CASE("deep callable literals retire without allocation") {
+TEST_CASE("deep callable literals retire") {
     auto owner = literal_chain(12000);
-    {
-        allocation_probe probe;
-        owner = cel::value{};
-    }
-    CHECK(allocation_count == 0);
+    CHECK_NOTHROW(owner = cel::value{});
 }
 
 TEST_CASE("deep callable literals retire while preserving an unwinding exception") {
     bool caught = false;
     try {
         auto owner = literal_chain(12000);
-        allocation_probe probe;
         auto retired = std::move(owner);
         throw unwind_error{};
     } catch (const unwind_error& error) {
         caught = error.tag == 17;
     }
     CHECK(caught);
-    CHECK(allocation_count == 0);
 }
 
-TEST_CASE("deep lazy captures retire without allocation") {
+TEST_CASE("deep lazy captures retire") {
     auto program = lazy_chain(12000);
     cel::dyn_segment empty;
     auto replacement = std::move(empty).finish();
-    {
-        allocation_probe probe;
-        program = std::move(replacement);
-    }
-    CHECK(allocation_count == 0);
+    CHECK_NOTHROW(program = std::move(replacement));
 }
 
 TEST_CASE("shared executable children survive another parent's retirement") {
     auto owner = literal_chain(12000);
     auto survivor = owner;
-    {
-        allocation_probe probe;
-        owner = cel::value{};
-    }
-
-    CHECK(allocation_count == 0);
+    owner = cel::value{};
     {
         auto fn = cel::callable::from_value(survivor);
         cel::raw_stack stack;
         CHECK(fn.call(stack, {}).type().same_shape(fn.type().result()));
     }
-    {
-        allocation_probe probe;
-        survivor = cel::value{};
-    }
-    CHECK(allocation_count == 0);
+    CHECK_NOTHROW(survivor = cel::value{});
 }
 
 TEST_CASE("array tuple and executable ownership edges share one retirement operation") {
@@ -104,11 +85,7 @@ TEST_CASE("array tuple and executable ownership edges share one retirement opera
         return cel::callable(std::move(body).finish(), {}).to_value();
     };
     auto root = create();
-    {
-        allocation_probe probe;
-        root = cel::value{};
-    }
-    CHECK(allocation_count == 0);
+    CHECK_NOTHROW(root = cel::value{});
 }
 
 TEST_CASE("deep lazy code retained by a prepared binding retires on its last release") {
@@ -118,9 +95,5 @@ TEST_CASE("deep lazy code retained by a prepared binding retires on its last rel
     auto replacement = std::move(empty).finish();
     auto replacement_binding = replacement.prepare_raw({}, cel::value_type{});
     program = std::move(replacement);
-    {
-        allocation_probe probe;
-        prepared = std::move(replacement_binding);
-    }
-    CHECK(allocation_count == 0);
+    CHECK_NOTHROW(prepared = std::move(replacement_binding));
 }

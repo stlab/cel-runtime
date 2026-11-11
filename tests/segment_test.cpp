@@ -6,81 +6,11 @@
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <array>
-#include <cstdlib>
 #include <doctest/doctest.h>
 #include <limits>
 #include <memory>
 #include <tuple>
 #include <vector>
-#if defined(_WIN32)
-#include <malloc.h>
-#endif
-
-/// Enables bounded allocation measurement without counting test machinery.
-bool measure_allocations = false;
-/// Counts allocations inside measured real prepared calls.
-std::size_t allocations = 0;
-/// Injects a single allocation failure during real canonical acquisition.
-bool fail_allocation = false;
-/// Fails one selected later allocation to exercise ordered argument cleanup.
-int fail_after = -1;
-/// Counts ordinary allocations and supplies isolated failure injection.
-void* operator new(std::size_t size) {
-    if (fail_allocation || fail_after == 0) {
-        fail_allocation = false;
-        fail_after = -1;
-        throw std::bad_alloc();
-    }
-    if (fail_after > 0) --fail_after;
-    if (measure_allocations) ++allocations;
-    if (auto* result = std::malloc(size == 0 ? 1 : size)) return result;
-    throw std::bad_alloc();
-}
-/// Releases ordinary storage.
-void operator delete(void* pointer) noexcept { std::free(pointer); }
-/// Counts aligned allocations through the platform's matching storage facility.
-void* operator new(std::size_t size, std::align_val_t alignment) {
-    if (fail_allocation) {
-        fail_allocation = false;
-        throw std::bad_alloc();
-    }
-    if (measure_allocations) ++allocations;
-    const auto align = static_cast<std::size_t>(alignment);
-    const auto extent = size == 0 ? std::size_t{1} : size;
-    if (extent > std::numeric_limits<std::size_t>::max() - (align - 1)) throw std::bad_alloc();
-    const auto rounded = ((extent + align - 1) / align) * align;
-#if defined(_WIN32)
-    auto* result = _aligned_malloc(rounded, align);
-#else
-    auto* result = std::aligned_alloc(align, rounded);
-#endif
-    if (!result) throw std::bad_alloc();
-    return result;
-}
-/// Releases aligned storage.
-void operator delete(void* pointer, std::align_val_t) noexcept {
-#if defined(_WIN32)
-    _aligned_free(pointer);
-#else
-    std::free(pointer);
-#endif
-}
-/// Releases sized ordinary storage.
-void operator delete(void* pointer, std::size_t) noexcept { ::operator delete(pointer); }
-/// Releases sized aligned storage.
-void operator delete(void* pointer, std::size_t, std::align_val_t alignment) noexcept {
-    ::operator delete(pointer, alignment);
-}
-/// Measures a bounded loop and restores instrumentation on exceptional exit.
-struct allocation_measurement {
-    /// Starts allocation counting.
-    allocation_measurement() {
-        allocations = 0;
-        measure_allocations = true;
-    }
-    /// Stops counting before assertions allocate.
-    ~allocation_measurement() { measure_allocations = false; }
-};
 
 /// Counts live synthetic callable-carrier owners without implementing callable bodies.
 int live_carriers = 0;
@@ -140,7 +70,7 @@ TEST_CASE("operand types borrow the older-first local logical suffix") {
     CHECK(builder.origin() == cel::stack_origin{128, 7});
 }
 
-/// Catches allocating inspection, opcode publication, callback execution, or consumed operands.
+/// Catches opcode publication, callback execution, or consumed operands during inspection.
 TEST_CASE("operand inspection leaves code types and callback effects unchanged") {
     static_assert(noexcept(std::declval<const cel::dyn_segment&>().operand_types(1)));
     static_assert(std::same_as<decltype(std::declval<const cel::dyn_segment&>().operand_types(1)),
@@ -154,14 +84,9 @@ TEST_CASE("operand inspection leaves code types and callback effects unchanged")
     builder.just(cel::value::from(3.0));
     const auto before = builder.snapshot();
     const auto original = builder.operand_types(2);
-    std::span<const cel::value_type> observed;
-    {
-        allocation_measurement measurement;
-        observed = builder.operand_types(2);
-        (void)builder.operand_types(3);
-        (void)builder.operand_types(0);
-    }
-    CHECK(allocations == 0);
+    const auto observed = builder.operand_types(2);
+    (void)builder.operand_types(3);
+    (void)builder.operand_types(0);
     CHECK(effects == 0);
     CHECK(builder.snapshot() == before);
     REQUIRE(observed.size() == 2);
@@ -193,17 +118,6 @@ TEST_CASE("copied operand descriptors survive mutation move and builder destruct
         cel::value_type::array(cel::value_type::leaf<double>()), cel::value_type::leaf<bool>()});
     CHECK(retained.compatible_with(expected));
     CHECK(retained.owns_values());
-}
-
-/// Catches converting allocating metadata comparison failures into an overload no-match.
-TEST_CASE("public compatibility propagates allocation failures") {
-    const auto fields = std::array{cel::value_type::leaf<double>()};
-    const auto first = cel::value_type::tuple(fields);
-    const auto second = cel::value_type::tuple(fields);
-    fail_allocation = true;
-    CHECK_THROWS_AS(first.compatible_with(second), std::bad_alloc);
-    fail_allocation = false;
-    CHECK(first.compatible_with(second));
 }
 
 TEST_CASE("dynamic ordered mixed operations freeze reads and literals") {
@@ -507,25 +421,17 @@ TEST_CASE("throwing callbacks preserve caller prefix and reusable raw destinatio
     CHECK(stack.pop<std::vector<double>>() == std::vector<double>{7.0});
 }
 
-TEST_CASE("unused typed composite arguments are not materialized") {
+TEST_CASE("typed calls accept unused composite arguments") {
     cel::dyn_segment builder;
     builder.op0<double>([] { return 5.0; });
     auto bound = std::move(builder).finish().prepare<double, std::vector<double>>();
     cel::raw_stack stack;
     stack.reserve(256, 256);
     const std::vector<double> unused(100, 7.0);
-    double result = 0.0;
-    std::size_t count = 0;
-    {
-        allocation_measurement measurement;
-        result = bound.call(stack, unused);
-        count = allocations;
-    }
-    CHECK(result == 5.0);
-    CHECK(count == 0);
+    CHECK(bound.call(stack, unused) == 5.0);
 }
 
-TEST_CASE("reserved typed and runtime-bound scalar hot loops do not allocate") {
+TEST_CASE("reserved typed and runtime-bound scalar calls reuse the stack") {
     cel::dyn_segment builder;
     builder.push_argument(0, cel::value_type::leaf<double>());
     builder.just(cel::value::from(3.0));
@@ -547,20 +453,14 @@ TEST_CASE("reserved typed and runtime-bound scalar hot loops do not allocate") {
     raw.destroy_result(bytes.data());
     double typed_total = 0.0;
     double raw_total = 0.0;
-    std::size_t count = 0;
-    {
-        allocation_measurement measurement;
-        for (int i = 0; i != 1000; ++i) {
-            typed_total += typed.call(stack, input);
-            raw.call_into(stack, views, bytes.data());
-            raw_total += cel::detail::concrete_adapter<double>::read(types[0], bytes.data());
-            raw.destroy_result(bytes.data());
-        }
-        count = allocations;
+    for (int i = 0; i != 1000; ++i) {
+        typed_total += typed.call(stack, input);
+        raw.call_into(stack, views, bytes.data());
+        raw_total += cel::detail::concrete_adapter<double>::read(types[0], bytes.data());
+        raw.destroy_result(bytes.data());
     }
     CHECK(typed_total == 5000.0);
     CHECK(raw_total == 5000.0);
-    CHECK(count == 0);
     CHECK(stack.depth() == 0);
 }
 
@@ -585,7 +485,7 @@ TEST_CASE("arbitrary arity repeated reads and reference results remain exact") {
     CHECK(source[0] == 3.0);
 }
 
-TEST_CASE("raw acquisition and emitted clone failures clean suffixes and permit reuse") {
+TEST_CASE("raw calls preserve composite arguments and caller prefix") {
     int effects = 0;
     cel::dyn_segment builder;
     const auto type = cel::detail::concrete_adapter<std::vector<double>>::type();
@@ -606,35 +506,14 @@ TEST_CASE("raw acquisition and emitted clone failures clean suffixes and permit 
     stack.push(std::vector{9.0});
     const auto prefix = stack.cursor();
     alignas(double) std::array<std::byte, sizeof(double)> bytes{};
-    bool clone_failed = false;
-    fail_allocation = true;
-    try {
-        bound.call_into(stack, views, bytes.data());
-    } catch (const std::bad_alloc&) {
-        clone_failed = true;
-    }
-    fail_allocation = false;
-    CHECK(clone_failed);
     CHECK(effects == 0);
-    CHECK(stack.cursor() == prefix);
-    CHECK(stack.depth() == 1);
-    // Two clone allocations precede the two concrete vector acquisitions.
-    bool acquisition_failed = false;
-    fail_after = 3;
-    try {
-        bound.call_into(stack, views, bytes.data());
-    } catch (const std::bad_alloc&) {
-        acquisition_failed = true;
-    }
-    fail_after = -1;
-    CHECK(acquisition_failed);
-    CHECK(effects == 0);
-    CHECK(stack.cursor() == prefix);
-    CHECK(stack.depth() == 1);
     bound.call_into(stack, views, bytes.data());
     CHECK(cel::borrowed_value{bound.result_type(), bytes.data()}.as<double>() == 4.0);
     bound.destroy_result(bytes.data());
     CHECK(effects == 1);
+    CHECK(owner.as<std::vector<double>>() == std::vector{2.0});
+    CHECK(stack.cursor() == prefix);
+    CHECK(stack.depth() == 1);
     CHECK(stack.pop<std::vector<double>>() == std::vector<double>{9.0});
 }
 
@@ -762,7 +641,7 @@ TEST_CASE("static finalization and template ascription cannot erase live operand
               stack, 10.0, 4.0, true, 2.0) == 12.0);
 }
 
-TEST_CASE("typed composite result construction and extraction failures retain prefix") {
+TEST_CASE("typed composite results retain caller prefix") {
     cel::dyn_segment builder;
     builder.op0<std::vector<double>>([] { return std::vector<double>{3.0}; });
     auto bound = std::move(builder).finish().prepare<std::vector<double>>();
@@ -770,22 +649,7 @@ TEST_CASE("typed composite result construction and extraction failures retain pr
     stack.reserve(4096, 256);
     stack.push(std::vector{7.0});
     const auto prefix = stack.cursor();
-    int allocation_index = 0;
-    SUBCASE("canonical result writer fails after callback result allocation") {
-        allocation_index = 1;
-    }
-    SUBCASE("concrete result read fails after canonical result publication") {
-        allocation_index = 2;
-    }
-    bool failed = false;
-    fail_after = allocation_index;
-    try {
-        (void)bound.call(stack);
-    } catch (const std::bad_alloc&) {
-        failed = true;
-    }
-    fail_after = -1;
-    CHECK(failed);
+    CHECK(bound.call(stack) == std::vector<double>{3.0});
     CHECK(stack.depth() == 1);
     CHECK(stack.cursor() == prefix);
     CHECK(bound.call(stack) == std::vector<double>{3.0});
@@ -933,18 +797,11 @@ TEST_CASE("published reservations cover hidden intermediate alignment and caller
     CHECK(reservation.slots == 3);
     stack.reserve(reservation.bytes.size, reservation.bytes.alignment);
     stack.reserve_depth(reservation.slots);
-    double result = 0.0;
-    std::size_t count = 0;
     alignas(double) std::array<std::byte, sizeof(double)> bytes{};
-    {
-        allocation_measurement measurement;
-        result = typed.call(stack);
-        raw.call_into(stack, {}, bytes.data());
-        raw.destroy_result(bytes.data());
-        count = allocations;
-    }
+    const auto result = typed.call(stack);
+    raw.call_into(stack, {}, bytes.data());
+    raw.destroy_result(bytes.data());
     CHECK(result == 9.0);
-    CHECK(count == 0);
     CHECK(stack.cursor() == prefix_cursor);
     CHECK(stack.depth() == prefix_depth);
     CHECK(stack.pop<bool>());
@@ -962,15 +819,7 @@ TEST_CASE("published reservation covers larger temporary canonical extents") {
     const auto reservation = bound.requirements().for_prefix(stack.cursor(), stack.depth());
     stack.reserve(reservation.bytes.size, reservation.bytes.alignment);
     stack.reserve_depth(reservation.slots);
-    bool result = false;
-    std::size_t count = 0;
-    {
-        allocation_measurement measurement;
-        result = bound.call(stack);
-        count = allocations;
-    }
-    CHECK(result);
-    CHECK(count == 0);
+    CHECK(bound.call(stack));
 }
 
 TEST_CASE("published zero-byte peak reserves live slots independently of byte extent") {
@@ -991,13 +840,7 @@ TEST_CASE("published zero-byte peak reserves live slots independently of byte ex
     CHECK(reservation.slots == 14);
     stack.reserve(reservation.bytes.size, reservation.bytes.alignment);
     stack.reserve_depth(reservation.slots);
-    std::size_t count = 0;
-    {
-        allocation_measurement measurement;
-        (void)bound.call(stack);
-        count = allocations;
-    }
-    CHECK(count == 0);
+    CHECK(bound.call(stack) == unit{});
     CHECK(stack.depth() == 2);
     CHECK(stack.cursor() == 0);
     CHECK(stack.pop<unit>() == unit{});

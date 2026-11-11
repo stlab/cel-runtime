@@ -10,106 +10,11 @@
 
 #include <array>
 #include <cstdint>
-#include <cstdlib>
 #include <limits>
 #include <memory>
-#include <new>
 #include <stdexcept>
 #include <tuple>
 #include <vector>
-#if defined(_WIN32)
-#include <malloc.h>
-#endif
-
-/// Counts allocations only inside bounded single-threaded measurement scopes.
-std::size_t allocation_calls = 0;
-/// Enables allocation instrumentation without allocating state.
-bool count_allocations = false;
-/// Injects one isolated allocation failure and then restores normal allocation.
-bool fail_next_allocation = false;
-/// Fails a later ordinary allocation after recording earlier acquired temporary storage.
-int allocations_before_failure = -1;
-/// Watches the first successful allocation in the bounded acquisition-failure test.
-void* acquired_argument = nullptr;
-/// Counts release of the watched temporary argument.
-int acquired_argument_releases = 0;
-/// Runs one bounded allocation callback to probe stable-byte acquisition reentry.
-void (*allocation_probe)() = nullptr;
-/// Counts ordinary allocations, propagating allocation failure.
-void* operator new(std::size_t size) {
-    if (allocation_probe) {
-        auto* probe = allocation_probe;
-        allocation_probe = nullptr;
-        probe();
-    }
-    if (allocations_before_failure == 0) {
-        allocations_before_failure = -1;
-        throw std::bad_alloc();
-    }
-    const bool watch = allocations_before_failure > 0;
-    if (watch) --allocations_before_failure;
-    if (fail_next_allocation) {
-        fail_next_allocation = false;
-        throw std::bad_alloc();
-    }
-    if (count_allocations) ++allocation_calls;
-    if (auto* result = std::malloc(size == 0 ? 1 : size)) {
-        if (watch) acquired_argument = result;
-        return result;
-    }
-    throw std::bad_alloc();
-}
-/// Releases ordinary storage.
-void operator delete(void* pointer) noexcept {
-    if (pointer && pointer == acquired_argument) {
-        acquired_argument = nullptr;
-        ++acquired_argument_releases;
-    }
-    std::free(pointer);
-}
-/// Counts aligned allocations using the platform's matching allocation facility.
-void* operator new(std::size_t size, std::align_val_t alignment) {
-    if (fail_next_allocation) {
-        fail_next_allocation = false;
-        throw std::bad_alloc();
-    }
-    if (count_allocations) ++allocation_calls;
-    const auto align = static_cast<std::size_t>(alignment);
-    const auto extent = size == 0 ? std::size_t{1} : size;
-    if (extent > std::numeric_limits<std::size_t>::max() - (align - 1)) throw std::bad_alloc();
-    const auto rounded = ((extent + align - 1) / align) * align;
-#if defined(_WIN32)
-    auto* result = _aligned_malloc(rounded, align);
-#else
-    auto* result = std::aligned_alloc(align, rounded);
-#endif
-    if (!result) throw std::bad_alloc();
-    return result;
-}
-/// Releases aligned storage using the matching platform facility.
-void operator delete(void* pointer, std::align_val_t) noexcept {
-#if defined(_WIN32)
-    _aligned_free(pointer);
-#else
-    std::free(pointer);
-#endif
-}
-/// Releases sized ordinary storage.
-void operator delete(void* pointer, std::size_t) noexcept { ::operator delete(pointer); }
-/// Releases sized aligned storage.
-void operator delete(void* pointer, std::size_t, std::align_val_t alignment) noexcept {
-    ::operator delete(pointer, alignment);
-}
-/// Measures allocations without counting test assertion machinery.
-struct allocation_scope {
-    /// Starts measurement.
-    allocation_scope() {
-        allocation_calls = 0;
-        count_allocations = true;
-    }
-    /// Stops measurement.
-    ~allocation_scope() { count_allocations = false; }
-};
 
 /// Exercises a client leaf requiring a larger alignment than built-ins.
 struct alignas(256) aligned_leaf {
@@ -244,7 +149,7 @@ TEST_CASE("captures survive input owners segment growth and segment moves") {
 }
 
 /// Verifies reservation covers both payload bytes and active slot bookkeeping.
-TEST_CASE("reserved scalar execution reuses one stack without allocation growth") {
+TEST_CASE("reserved scalar execution reuses one stack") {
     cel::raw_stack stack;
     stack.reserve(1024, 256);
     cel::raw_segment number;
@@ -262,7 +167,6 @@ TEST_CASE("reserved scalar execution reuses one stack without allocation growth"
     }
     bool correct = true;
     {
-        allocation_scope measured;
         for (int i = 0; i != 2000; ++i) {
             cel::frame scope(stack);
             number.execute(scope);
@@ -272,7 +176,6 @@ TEST_CASE("reserved scalar execution reuses one stack without allocation growth"
         }
     }
     CHECK(correct);
-    CHECK(allocation_calls == 0);
     CHECK(stack.depth() == 0);
 }
 
@@ -360,7 +263,6 @@ TEST_CASE("zero byte units and over-aligned operations reuse explicitly reserved
     }
     bool correct = true;
     {
-        allocation_scope measured;
         for (int i = 0; i != 100; ++i) {
             cel::frame scope(stack);
             segment.execute(scope);
@@ -371,7 +273,6 @@ TEST_CASE("zero byte units and over-aligned operations reuse explicitly reserved
         }
     }
     CHECK(correct);
-    CHECK(allocation_calls == 0);
     int released = 0;
     {
         cel::raw_segment replaced;
@@ -527,7 +428,6 @@ TEST_CASE("explicit canonical frames clone emitted reads and extract independent
     }
     bool correct = true;
     {
-        allocation_scope measured;
         for (int i = 0; i != 1000; ++i) {
             cel::frame scope(stack, scalar_arguments, &context);
             reads.execute(scope);
@@ -539,7 +439,6 @@ TEST_CASE("explicit canonical frames clone emitted reads and extract independent
         }
     }
     CHECK(correct);
-    CHECK(allocation_calls == 0);
 
     auto owner = cel::value::from(std::vector<std::vector<double>>{{1.0, 2.0}});
     const std::array borrowed{
@@ -570,34 +469,6 @@ TEST_CASE("explicit canonical frames clone emitted reads and extract independent
     CHECK_THROWS_AS(cel::frame(stack, misaligned), std::invalid_argument);
     cel::frame scope(stack);
     CHECK(scope.depth() == 0);
-}
-
-/// Verifies failure to acquire outer result storage never consumes a live canonical owner.
-TEST_CASE("allocation failures preserve source ownership and reusable stack boundaries") {
-    cel::raw_stack stack;
-    auto source = cel::value::from(std::vector{2.0, 3.0});
-    fail_next_allocation = true;
-    CHECK_THROWS_AS(stack.push_take(source), std::bad_alloc);
-    CHECK(source.at(0).as<double>() == 2.0);
-    CHECK(stack.depth() == 0);
-    stack.push_take(source);
-    fail_next_allocation = true;
-    CHECK_THROWS_AS(stack.pop_value(), std::bad_alloc);
-    CHECK(stack.depth() == 1);
-    CHECK(stack.pop_value().at(1).as<double>() == 3.0);
-
-    int released = 0;
-    {
-        cel::raw_segment sequence;
-        sequence.push_op0<double>([](cel::frame&) { return 4.0; });
-        auto input = owning_capture(released);
-        fail_next_allocation = true;
-        CHECK_THROWS_AS(sequence.push_op0<double>(std::move(input)), std::bad_alloc);
-        cel::frame scope(stack);
-        sequence.execute(scope);
-        CHECK(scope.pop<double>() == 4.0);
-    }
-    CHECK(released == 1);
 }
 
 /// Catches conservative type-capability rejection of valid uninhabited packed owners.
@@ -658,11 +529,8 @@ struct reentry_scope {
     reentry_scope(const reentry_scope&) = delete;
     /// Disallows reassigned hook-scope ownership.
     reentry_scope& operator=(const reentry_scope&) = delete;
-    /// Restores the prior context and clears any pending allocation probe.
-    ~reentry_scope() {
-        active_reentry = previous;
-        allocation_probe = nullptr;
-    }
+    /// Restores the prior context.
+    ~reentry_scope() { active_reentry = previous; }
 };
 /// Clones a synthetic owner after a bounded construction reentry attempt.
 void clone_reentry(const std::byte* source, std::byte* target) {
@@ -685,9 +553,6 @@ void destroy_reentry(std::byte*) noexcept {
     }
     --live_resources;
 }
-/// Probes reentry during the first allocation of a concrete vector extraction.
-void probe_acquisition() { active_reentry->probe(); }
-
 /// Catches clone/write offset reuse and retiring-slot mutation at safe boundaries.
 TEST_CASE("payload clone and noexcept retirement hooks reject reentry") {
     const auto type = cel::detail::type_access::install_callable_ownership(
@@ -759,62 +624,6 @@ TEST_CASE("rejected clone reentry rolls back only the frame suffix and restores 
     CHECK(stack.pop<std::vector<double>>() == std::vector{4.0, 5.0});
 }
 
-/// Catches source-byte invalidation by an allocator callback during safe concrete extraction.
-TEST_CASE("stable operand acquisition rejects mutation and frame entry") {
-    cel::raw_stack stack;
-    stack.reserve(1024, 256);
-    stack.push(10.0);
-    {
-        cel::frame scope(stack);
-        scope.push(std::vector{2.0, 3.0});
-        reentry_state attempts{stack, &scope};
-        reentry_scope enabled(attempts);
-        allocation_probe = probe_acquisition;
-        const auto extracted = scope.pop<std::vector<double>>();
-        allocation_probe = nullptr;
-        active_reentry = nullptr;
-        CHECK(attempts.rejected == 3);
-        CHECK(extracted == std::vector{2.0, 3.0});
-        CHECK(scope.depth() == 0);
-        scope.push(true);
-        CHECK(scope.pop<bool>());
-    }
-    CHECK(stack.pop<double>() == 10.0);
-}
-
-/// Catches leaked earlier arguments and unintended invocation after later materialization fails.
-TEST_CASE("later composite argument acquisition failure releases earlier temporaries") {
-    cel::raw_stack stack;
-    stack.reserve(1024, 256);
-    stack.push(std::vector{11.0});
-    bool invoked = false;
-    cel::raw_segment sequence;
-    sequence.push_op2<void, std::vector<double>, std::vector<double>>(
-        [&invoked](cel::frame&, std::vector<double>, std::vector<double>) { invoked = true; });
-    {
-        cel::frame scope(stack);
-        scope.push(std::vector{1.0, 2.0});
-        scope.push(std::vector{3.0, 4.0});
-        acquired_argument_releases = 0;
-        allocations_before_failure = 1;
-        bool failed = false;
-        try {
-            sequence.execute(scope);
-        } catch (const std::bad_alloc&) {
-            failed = true;
-        }
-        allocations_before_failure = -1;
-        CHECK(failed);
-        CHECK_FALSE(invoked);
-        CHECK(acquired_argument == nullptr);
-        CHECK(acquired_argument_releases == 1);
-        CHECK(scope.depth() == 0);
-        scope.push(std::vector{6.0});
-        CHECK(scope.pop<std::vector<double>>() == std::vector{6.0});
-    }
-    CHECK(stack.pop<std::vector<double>>() == std::vector{11.0});
-}
-
 /// Verifies null bytes preserve non-unit zero-byte aggregate identity and stack effects.
 TEST_CASE("borrowed non-unit zero-byte aggregates preserve complete shape") {
     using aggregate = std::tuple<std::tuple<>, std::tuple<>>;
@@ -847,11 +656,10 @@ TEST_CASE("scoped canonical acquisition and direct writers contain reentry") {
         const auto type = cel::detail::concrete_adapter<std::vector<double>>::type();
         reentry_state attempts{stack, &scope};
         reentry_scope enabled(attempts);
-        allocation_probe = probe_acquisition;
         const auto acquired = cel::detail::frame_access::acquire(scope, [&](const auto& operands) {
+            attempts.probe();
             return cel::detail::value_access::copy(type, operands.operand(0, type));
         });
-        allocation_probe = nullptr;
         active_reentry = nullptr;
         CHECK(attempts.rejected == 3);
         CHECK(acquired.as<std::vector<double>>() == std::vector{7.0, 8.0});

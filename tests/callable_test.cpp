@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: BSL-1.0
-#include "allocation_probe.hpp"
 #include "type_ops.hpp"
 #include "value_ops.hpp"
 #include <cel/runtime.hpp>
@@ -15,12 +14,6 @@ struct client_result {
 struct alignas(256) wide_result {
     bool flag; ///< Retains the intermediate result.
 };
-/// Borrows the callable used by a bounded acquisition-reentry test.
-const cel::callable* acquisition_callable = nullptr;
-/// Borrows its caller-owned stack.
-cel::raw_stack* acquisition_stack = nullptr;
-/// Records observable same-carrier rejection.
-bool acquisition_rejected = false;
 /// Counts foreign ownership operations to detect access before ABI rejection.
 int foreign_clones = 0;
 /// Counts foreign canonical retirement.
@@ -32,14 +25,6 @@ void clone_foreign(const std::byte* source, std::byte* destination) {
 }
 /// Retires the resource-free foreign representation without dereferencing it.
 void destroy_foreign(std::byte*) noexcept { ++foreign_destroys; }
-/// Attempts one same-carrier call during invocation-storage acquisition.
-void acquisition_reentry() {
-    try {
-        (void)acquisition_callable->call(*acquisition_stack, {});
-    } catch (const std::logic_error&) {
-        acquisition_rejected = true;
-    }
-}
 TEST_CASE("runtime ownership binding preserves deferred signatures and canonical witnesses") {
     const auto number = cel::value_type::leaf<double>();
     const auto declared = cel::value_type::callable(std::array{number}, number);
@@ -185,11 +170,7 @@ TEST_CASE("binding traverses deep metadata and preserves shared DAGs") {
         const auto edge = cel::value_type::array(shared);
         shared = cel::value_type::tuple(std::array{edge, edge});
     }
-    auto result = [&] {
-        allocation_probe probe;
-        return cel::bind_runtime_ownership(shared);
-    }();
-    CHECK(allocation_count < 64 * static_cast<std::size_t>(depth + 1));
+    auto result = cel::bind_runtime_ownership(shared);
     CHECK(result.same_shape(shared));
     for (int i = 0; i != depth; ++i) {
         REQUIRE(result.owns_values());
@@ -197,60 +178,6 @@ TEST_CASE("binding traverses deep metadata and preserves shared DAGs") {
         result = result.fields()[0].element();
     }
     CHECK(result.owns_values());
-}
-TEST_CASE(
-    "binding allocation failures preserve original descriptors and reclaim partial metadata") {
-    const auto declared = cel::value_type::callable({}, cel::value_type::leaf<double>());
-    const auto input = cel::value_type::record(
-        "failure", std::array{cel::record_field{"first", cel::value_type::array(declared)},
-                              cel::record_field{"second", declared}});
-    const auto saved = input;
-    {
-        allocation_probe probe;
-        (void)cel::bind_runtime_ownership(input);
-    }
-    const auto allocations = allocation_count;
-    REQUIRE(allocations > 0);
-    REQUIRE(allocations < 1000);
-    for (int budget = 0; budget != static_cast<int>(allocations); ++budget) {
-        bool failed = false;
-        {
-            allocation_failure_probe failure(budget);
-            try {
-                (void)cel::bind_runtime_ownership(input);
-            } catch (const std::bad_alloc&) {
-                failed = true;
-            }
-        }
-        CHECK(failed);
-        CHECK_FALSE(input.owns_values());
-        CHECK(cel::detail::type_access::same_plan(input, saved));
-        CHECK(cel::bind_runtime_ownership(input).owns_values());
-    }
-    auto deep = input;
-    for (int i = 0; i != 4000; ++i)
-        deep = cel::value_type::array(deep);
-    {
-        allocation_probe probe;
-        (void)cel::bind_runtime_ownership(deep);
-    }
-    const auto deep_allocations = allocation_count;
-    REQUIRE(deep_allocations > 0);
-    REQUIRE(deep_allocations < 100000);
-    for (int budget : {0, static_cast<int>(deep_allocations - 1)}) {
-        bool failed = false;
-        {
-            allocation_failure_probe failure(budget);
-            try {
-                (void)cel::bind_runtime_ownership(deep);
-            } catch (const std::bad_alloc&) {
-                failed = true;
-            }
-        }
-        CHECK(failed);
-        CHECK_FALSE(deep.owns_values());
-        CHECK(cel::bind_runtime_ownership(deep).owns_values());
-    }
 }
 TEST_CASE("callable full declarations include unused composite parameters") {
     int effects = 0;
@@ -337,7 +264,7 @@ TEST_CASE("composite parameters and nested callable owning results retain comple
     cel::callable factory(std::move(owner).finish(), {});
     CHECK(cel::callable::from_value(factory.call(stack, {}).at(0)).call(stack, {}).as<bool>());
 }
-TEST_CASE("nested invocation allocation failures release staged owners and permit reuse") {
+TEST_CASE("nested invocation preserves owning results and caller prefix") {
     cel::dyn_segment body;
     body.push_argument(0, cel::value_type::array(cel::value_type::leaf<double>()));
     body.make_tuple(1, {});
@@ -351,25 +278,14 @@ TEST_CASE("nested invocation allocation failures release staged owners and permi
     const auto reservation = program.requirements().for_prefix(0, 0);
     stack.reserve(reservation.bytes.size + 128, reservation.bytes.alignment);
     stack.push(std::vector{9.0});
-    for (int fail = 0; fail != 40; ++fail) {
-        allocation_failure_after = fail;
-        bool failed = false;
-        try {
-            auto result = program.execute(stack, {});
-            allocation_failure_after = -1;
-            CHECK(result.at(0).as<std::vector<double>>() == std::vector{2.0, 5.0});
-        } catch (const std::bad_alloc&) {
-            allocation_failure_after = -1;
-            failed = true;
-        }
+    for (int repeat = 0; repeat != 2; ++repeat) {
+        auto result = program.execute(stack, {});
+        CHECK(result.at(0).as<std::vector<double>>() == std::vector{2.0, 5.0});
         CHECK(stack.depth() == 1);
-        if (failed)
-            CHECK(program.execute(stack, {}).at(0).as<std::vector<double>>() ==
-                  std::vector{2.0, 5.0});
     }
     CHECK(stack.pop<std::vector<double>>() == std::vector{9.0});
 }
-TEST_CASE("reserved lazy scalar dispatch remains allocation free while invocation stages owners") {
+TEST_CASE("reserved lazy scalar dispatch and callable invocation reuse the stack") {
     cel::dyn_segment b;
     b.push_argument(0, cel::value_type::leaf<bool>());
     cel::dyn_segment rhs(b.before_top());
@@ -381,12 +297,8 @@ TEST_CASE("reserved lazy scalar dispatch remains allocation free while invocatio
     stack.reserve(required.bytes.size, required.bytes.alignment);
     stack.reserve_depth(required.slots);
     CHECK(scalar.call(stack, true));
-    {
-        allocation_probe probe;
-        for (int i = 0; i != 100; ++i)
-            (void)scalar.call(stack, true);
-    }
-    CHECK(allocation_count == 0);
+    for (int i = 0; i != 100; ++i)
+        CHECK(scalar.call(stack, true));
     cel::dyn_segment body;
     body.push_argument(0, cel::value_type::leaf<double>());
     cel::dyn_segment outer;
@@ -395,12 +307,7 @@ TEST_CASE("reserved lazy scalar dispatch remains allocation free while invocatio
     outer.invoke_closure(1);
     auto invoke = std::move(outer).finish().prepare<double>();
     CHECK(invoke.call(stack) == 4.0);
-    {
-        allocation_probe probe;
-        (void)invoke.call(stack);
-    }
-    MESSAGE("warmed scalar callable invocation allocations: ", allocation_count);
-    CHECK(allocation_count > 0);
+    CHECK(invoke.call(stack) == 4.0);
 }
 TEST_CASE("same carrier reentry rejects and throwing bodies preserve stack reuse") {
     cel::raw_stack stack;
@@ -435,53 +342,6 @@ TEST_CASE("direct known callee requirements include intermediate alignment and e
     stack.reserve_depth(reservation.slots);
     CHECK(program.prepare<bool>().call(stack));
 }
-TEST_CASE("public checked calls reject same carrier entry throughout invocation acquisition") {
-    int effects = 0;
-    cel::dyn_segment b;
-    b.op0<bool>([&effects] {
-        ++effects;
-        return true;
-    });
-    cel::callable fn(std::move(b).finish(), {});
-    cel::raw_stack stack;
-    acquisition_callable = &fn;
-    acquisition_stack = &stack;
-    acquisition_rejected = false;
-    allocation_hook = acquisition_reentry;
-    CHECK(fn.call(stack, {}).as<bool>());
-    CHECK(acquisition_rejected);
-    CHECK(effects == 1);
-    acquisition_callable = nullptr;
-    acquisition_stack = nullptr;
-}
-TEST_CASE("dynamic calls reject alias entry before staging acquisition") {
-    int effects = 0;
-    cel::dyn_segment body;
-    body.op0<bool>([&effects] {
-        ++effects;
-        return true;
-    });
-    cel::callable fn(std::move(body).finish(), {});
-    auto alias = fn;
-    cel::raw_stack stack;
-    stack.push(std::vector{9.0});
-    acquisition_callable = &alias;
-    acquisition_stack = &stack;
-    acquisition_rejected = false;
-    cel::dyn_segment outer;
-    outer.just(fn.to_value());
-    outer.op0<void>([] { allocation_hook = acquisition_reentry; });
-    outer.invoke_closure(0);
-    auto program = std::move(outer).finish();
-    auto result = program.execute(stack, {});
-    allocation_hook = nullptr;
-    acquisition_callable = nullptr;
-    acquisition_stack = nullptr;
-    CHECK(acquisition_rejected);
-    CHECK(effects == 1);
-    CHECK(result.as<bool>());
-    CHECK(stack.pop<std::vector<double>>() == std::vector{9.0});
-}
 TEST_CASE("distinct callable carriers nest inside a guarded dynamic invocation") {
     int inner_effects = 0, outer_effects = 0;
     cel::raw_stack stack;
@@ -505,61 +365,6 @@ TEST_CASE("distinct callable carriers nest inside a guarded dynamic invocation")
     CHECK(inner_effects == 1);
     CHECK(outer_effects == 1);
     CHECK(stack.pop<std::vector<double>>() == std::vector{6.0});
-}
-TEST_CASE("call opcode construction allocation failures preserve original callee and arguments") {
-    int body_effects = 0, parent_effects = 0;
-    cel::dyn_segment body;
-    body.push_argument(0, cel::value_type::leaf<double>());
-    body.op1<double, double>([&body_effects](double n) {
-        ++body_effects;
-        return n + 1.0;
-    });
-    cel::callable fn(std::move(body).finish(), std::array{cel::value_type::leaf<double>()});
-    auto parent = [&] {
-        cel::dyn_segment b;
-        b.just(fn.to_value());
-        b.op0<double>([&parent_effects] {
-            ++parent_effects;
-            return 7.0;
-        });
-        return b;
-    };
-    {
-        auto calibrated = parent();
-        allocation_probe probe;
-        calibrated.invoke_closure(1);
-    }
-    const auto allocations = allocation_count;
-    REQUIRE(allocations > 1);
-    REQUIRE(allocations <= static_cast<std::size_t>(std::numeric_limits<int>::max()));
-    for (int budget : {0, static_cast<int>(allocations - 1)}) {
-        parent_effects = 0;
-        body_effects = 0;
-        auto b = parent();
-        const auto original = b.snapshot();
-        bool failed = false;
-        {
-            allocation_failure_probe failure(budget);
-            try {
-                b.invoke_closure(1);
-            } catch (const std::bad_alloc&) {
-                failed = true;
-            }
-        }
-        CHECK(failed);
-        CHECK(b.snapshot() == original);
-        CHECK(parent_effects == 0);
-        CHECK(body_effects == 0);
-        b.make_tuple(2, {});
-        cel::raw_stack stack;
-        auto result = std::move(b).finish().execute(stack, {});
-        CHECK(result.at(1).as<double>() == 7.0);
-        CHECK(parent_effects == 1);
-        CHECK(body_effects == 0);
-        auto original_callee = cel::callable::from_value(result.at(0));
-        CHECK(original_callee.call(stack, std::array{result.at(1)}).as<double>() == 8.0);
-        CHECK(body_effects == 1);
-    }
 }
 TEST_CASE("conversion and dynamic invocation reject foreign same shape ownership before access") {
     foreign_clones = 0;

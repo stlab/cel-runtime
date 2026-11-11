@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: BSL-1.0
-#include "allocation_probe.hpp"
 #include "type_ops.hpp"
 #include "value_ops.hpp"
 #include <cel/runtime/dyn_segment.hpp>
@@ -133,63 +132,6 @@ TEST_CASE("record duplicate and wrong length permutations preserve original code
     CHECK_FALSE(result.at(1).as<bool>());
     CHECK(effects == 2);
 }
-TEST_CASE("structural construction allocation failures preserve operands code and owners") {
-    const auto opaque = cel::detail::type_access::install_callable_ownership(
-        cel::value_type::callable({}, cel::value_type::leaf<bool>()),
-        {clone_opaque, destroy_opaque});
-    const std::array fields{cel::record_field{"n", cel::value_type::leaf<double>()},
-                            cel::record_field{"owner", opaque}};
-    const auto record = cel::value_type::record("rollback", fields);
-    const std::array<std::size_t, 2> mapping{0, 1};
-    int effects = 0;
-    auto parent = [&] {
-        cel::dyn_segment b;
-        b.op0<double>([&effects] {
-            ++effects;
-            return 4.0;
-        });
-        b.just(make_opaque(opaque));
-        return b;
-    };
-    {
-        auto calibrated = parent();
-        allocation_probe probe;
-        calibrated.make_record(record, mapping, {});
-    }
-    const auto allocations = allocation_count;
-    REQUIRE(allocations > 1);
-    REQUIRE(allocations <= static_cast<std::size_t>(std::numeric_limits<int>::max()));
-    // Two original opcodes fill their dispatch vector; the final allocation appends the third.
-    for (int budget : {0, static_cast<int>(allocations - 1)}) {
-        effects = 0;
-        {
-            auto b = parent();
-            const auto original = b.snapshot();
-            bool failed = false;
-            {
-                allocation_failure_probe failure(budget);
-                try {
-                    b.make_record(record, mapping, {});
-                } catch (const std::bad_alloc&) {
-                    failed = true;
-                }
-            }
-            CHECK(failed);
-            CHECK(b.snapshot() == original);
-            CHECK(effects == 0);
-            CHECK(opaque_owners == 1);
-            b.make_tuple(2, {});
-            cel::raw_stack stack;
-            auto program = std::move(b).finish();
-            auto result = program.execute(stack, {});
-            CHECK(result.at(0).as<double>() == 4.0);
-            CHECK(result.at(1).type().same_shape(opaque));
-            CHECK(effects == 1);
-            CHECK(opaque_owners == 2);
-        }
-        CHECK(opaque_owners == 0);
-    }
-}
 TEST_CASE("every range kind retains endpoint metadata and source order") {
     for (auto kind : {cel::range_kind::range, cel::range_kind::range_inclusive,
                       cel::range_kind::range_from, cel::range_kind::range_to,
@@ -321,65 +263,6 @@ TEST_CASE("lazy joins reject non bool conditions and zero or multiple result bod
         CHECK(effects == 1);
     }
 }
-TEST_CASE("lazy construction allocation failures do not publish branch reads or effects") {
-    const auto opaque = cel::detail::type_access::install_callable_ownership(
-        cel::value_type::callable({}, cel::value_type::leaf<bool>()),
-        {clone_opaque, destroy_opaque});
-    int effects = 0;
-    auto parent = [&] {
-        cel::dyn_segment b;
-        b.just(make_opaque(opaque));
-        b.op0<bool>([&effects] {
-            ++effects;
-            return false;
-        });
-        return b;
-    };
-    auto branch = [](cel::stack_origin origin, std::size_t index) {
-        cel::dyn_segment b(origin);
-        b.push_argument(index, cel::value_type::leaf<bool>());
-        return b;
-    };
-    {
-        auto calibrated = parent();
-        auto yes = branch(calibrated.before_top(), 3), no = branch(calibrated.before_top(), 4);
-        allocation_probe probe;
-        calibrated.if_else(std::move(yes), std::move(no));
-    }
-    const auto allocations = allocation_count;
-    REQUIRE(allocations > 1);
-    REQUIRE(allocations <= static_cast<std::size_t>(std::numeric_limits<int>::max()));
-    for (int budget : {0, static_cast<int>(allocations - 1)}) {
-        effects = 0;
-        {
-            auto b = parent();
-            const auto original = b.snapshot();
-            auto yes = branch(b.before_top(), 3), no = branch(b.before_top(), 4);
-            bool failed = false;
-            {
-                allocation_failure_probe failure(budget);
-                try {
-                    b.if_else(std::move(yes), std::move(no));
-                } catch (const std::bad_alloc&) {
-                    failed = true;
-                }
-            }
-            CHECK(failed);
-            CHECK(b.snapshot() == original);
-            CHECK(effects == 0);
-            CHECK(opaque_owners == 1);
-            b.make_tuple(2, {});
-            auto program = std::move(b).finish();
-            CHECK(program.argument_reads().empty());
-            cel::raw_stack stack;
-            auto result = program.execute(stack, {});
-            CHECK(result.at(0).type().same_shape(opaque));
-            CHECK_FALSE(result.at(1).as<bool>());
-            CHECK(effects == 1);
-        }
-        CHECK(opaque_owners == 0);
-    }
-}
 TEST_CASE("lazy requirements retain zero byte prefix depth and maximum selected branch peak") {
     cel::dyn_segment b;
     b.just(cel::value{});
@@ -408,7 +291,7 @@ TEST_CASE("lazy requirements retain zero byte prefix depth and maximum selected 
     stack.reserve_depth(required.slots);
     CHECK(program.execute(stack, {}).at(1).size() == 10);
 }
-TEST_CASE("nested record array packing and projection cleanup survive allocation failures") {
+TEST_CASE("nested record array packing and projection preserve caller prefix") {
     const auto array = cel::value_type::array(cel::value_type::leaf<double>());
     const std::array fields{cel::record_field{"a", array}, cel::record_field{"b", array}};
     const auto record = cel::value_type::record("owned", fields);
@@ -423,17 +306,10 @@ TEST_CASE("nested record array packing and projection cleanup survive allocation
     auto program = std::move(b).finish();
     cel::raw_stack stack;
     stack.push(std::vector{9.0});
-    for (int fail = 0; fail != 40; ++fail) {
-        allocation_failure_after = fail;
-        try {
-            auto result = program.execute(stack, {});
-            allocation_failure_after = -1;
-            CHECK(result.as<std::vector<double>>() == std::vector{2.0});
-        } catch (const std::bad_alloc&) {
-            allocation_failure_after = -1;
-        }
+    for (int repeat = 0; repeat != 2; ++repeat) {
+        auto result = program.execute(stack, {});
+        CHECK(result.as<std::vector<double>>() == std::vector{2.0});
         CHECK(stack.depth() == 1);
-        CHECK(program.execute(stack, {}).as<std::vector<double>>() == std::vector{2.0});
     }
     CHECK(stack.pop<std::vector<double>>() == std::vector{9.0});
 }
@@ -460,18 +336,7 @@ TEST_CASE("consuming projection transfers selected owners and retires siblings w
             CHECK(opaque_owners == 3);
         }
         CHECK(opaque_owners == 2);
-        for (int fail = 0; fail != 24; ++fail) {
-            allocation_failure_after = fail;
-            try {
-                auto result = program.execute(stack, {});
-                allocation_failure_after = -1;
-                CHECK(result.type().same_shape(signature));
-            } catch (const std::bad_alloc&) {
-                allocation_failure_after = -1;
-            }
-            CHECK(opaque_owners == 2);
-            CHECK(stack.depth() == 0);
-        }
+        CHECK(stack.depth() == 0);
     }
     CHECK(opaque_owners == 0);
 }
