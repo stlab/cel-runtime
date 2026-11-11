@@ -7,6 +7,11 @@ The Rust baseline is
 C++ source links identify checkout tests by name or line. Update the links and
 revision when changing a contract, then run its linked tests.
 
+Windows CI uses the `test` preset's Debug configuration, which enables
+[MSVC iterator debugging](https://learn.microsoft.com/en-us/cpp/standard-library/iterator-debug-level)
+at its default `_ITERATOR_DEBUG_LEVEL=2`. Tests do not replace global allocation
+functions.
+
 ## Implemented and tested contracts
 
 The following entries cover the retained runtime surfaces:
@@ -103,8 +108,8 @@ public Rust driver.
 P4 measurements keep direct prepared scalar execution separate from ordinary
 named scalar calls, whose parser emits owning marker/result intermediates.
 Native nested-array conversion, erased owning results, and dynamic invocation
-have separate allocation/timing passes. Those local costs do not alter the
-runtime's zero-allocation direct scalar contract or establish portable speed.
+have separate timing workloads. Those local timings establish neither portable
+speed nor allocation counts.
 
 [rust-stack]: https://github.com/stlab/cel-rs/blob/03d658f8b12acabe1d6a2503281e7c86cf00b6a3/cel-runtime/src/raw_stack.rs#L24-L76
 [rust-raw]: https://github.com/stlab/cel-rs/blob/03d658f8b12acabe1d6a2503281e7c86cf00b6a3/cel-runtime/src/raw_segment.rs#L68-L433

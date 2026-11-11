@@ -233,16 +233,12 @@ Relocation transfers an internal logical owner and retires its source; public
 value copying never relocates native objects bytewise or adopts standard
 container raw parts. Aggregates copy their mutable payloads independently.
 
-The optimized contract tests measure these boundaries:
+Prepared scalar execution reuses reserved stack storage. Public checked callable
+calls allocate an argument-view table and result storage/facade. Structural
+outer staging, array owners and element extents, composite reads/results, native
+adapters, and client callbacks can allocate.
 
-- Warmed ordinary prepared scalar dispatch allocates nothing after reservation.
-- A warmed prepared bool lazy path allocates zero times across 100 calls.
-- A warmed reserved scalar dynamic callable invocation allocates four times:
-  literal carrier cloning, packed staging, an argument-view table, and the
-  canonical result extent.
-
-These are test measurements, not a zero-allocation promise for every program.
-Public checked callable calls allocate an argument-view table and result
-storage/facade. Structural outer staging, array owners and element extents,
-composite reads/results, native adapters, and client callbacks can allocate.
-See [the contract ledger](parity.md) for the tests and retained boundaries.
+The tests verify functional ownership, cleanup, and prefix preservation. They do
+not replace global allocation functions, measure allocation counts, or inject
+allocation failures. See [the contract ledger](parity.md) for the tested
+boundaries.
