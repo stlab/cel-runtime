@@ -8,17 +8,18 @@
 /// Example: `cel::align_offset(1, 64) == 64`.
 namespace cel {
 
-/// Describes a byte extent and its requested alignment.
-/// Valid alignment is a nonzero power of two; operations validate it at their boundaries.
+/// Describes a byte extent and its requested alignment, both in bytes.
+/// A checked storage operation accepts a zero size but requires a nonzero power-of-two
+/// alignment. The fields describe storage, not initialized objects or their ownership.
 /// Example: `cel::layout leaf{sizeof(double), alignof(double)};`.
 struct layout {
-    /// Counts bytes in the extent.
+    /// Counts bytes in the extent; zero describes an empty extent.
     std::size_t size;
-    /// Specifies the requested alignment in bytes.
+    /// Specifies the requested nonzero power-of-two alignment in bytes.
     std::size_t alignment;
 };
 
-/// Returns the smallest multiple of alignment not less than offset.
+/// Returns the smallest multiple of alignment not less than offset, in bytes.
 /// Throws std::invalid_argument for zero or non-power-of-two alignment.
 /// Throws std::overflow_error if the rounded offset cannot fit in std::size_t.
 /// Example: `cel::align_offset(1, 64) == 64`.

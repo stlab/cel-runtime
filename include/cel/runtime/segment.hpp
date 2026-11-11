@@ -5,6 +5,7 @@
 
 namespace cel {
 /// Describes source-order types without assuming any physical tuple layout.
+/// The first type is the oldest operand; an empty list contains no operands.
 /// Example: `type_list<double, bool>` describes two ordered operands.
 template <class... T>
 struct type_list {};
@@ -59,10 +60,24 @@ struct static_stack<type_list<T...>> {
 /// Only matching initial Args/Stack instances can be constructed directly; other stack
 /// types result from checked operations, not template ascription of unrelated origins.
 /// Finalization requires one operand or source unit, never silent leftover discard.
+/// Moving transfers construction ownership; use the source only for destruction or assignment.
+/// Destruction releases unfinished captures and metadata.
+/// Complexity: destruction takes O(owned captures, metadata, and client destructor work).
 /// Example: `segment<type_list<double>> b; auto p = std::move(b).finish();`.
+///
+/// Replace the seeded input and prepare a typed call:
+/// @code
+/// cel::segment<cel::type_list<double>> builder;
+/// auto next = std::move(builder).op1<double>([](double n) { return n * 2.0; });
+/// auto program = std::move(next).finish();
+/// auto bound = program.prepare<double, double>();
+/// cel::raw_stack stack;
+/// auto result = bound.call(stack, 3.0); // 6.0; the call borrows its input.
+/// @endcode
 template <class Args, class Stack = Args>
 class segment;
 /// Implements typed source-order stack flow using ordinary checked construction.
+/// Follows segment's ownership and example; Stack lists current operands, oldest first.
 template <class... Args, class... Stack>
 class segment<type_list<Args...>, type_list<Stack...>> {
     dyn_segment _builder;
@@ -104,8 +119,10 @@ public:
     /// Complexity: O(old captures and metadata).
     segment& operator=(segment&&) noexcept = default;
     /// Consumes an exact declared suffix and produces R, or no operand for void.
-    /// Throws only construction errors inherited from dyn_segment::op.
-    /// Complexity: O(arity + compared metadata + capture construction).
+    /// Returns a builder with the consumed suffix replaced by R, omitting R when it is void.
+    /// Follows dyn_segment::op's exact callback, capture lifetime, and construction error contract.
+    /// Complexity: O(arity + compared metadata + capture construction), plus O(current stack depth)
+    /// metadata transfer on growth.
     /// Example: `auto next = std::move(b).op<double, double>([](double n) { return n; });`.
     template <class R, class... A, class F>
     requires(detail::static_stack<type_list<Stack...>>::template matches<A...>() &&
@@ -115,14 +132,16 @@ public:
             typename detail::static_stack<type_list<Stack...>>::template effect<R, sizeof...(A)>;
         return segment<type_list<Args...>, output>(std::move(_builder));
     }
-    /// Pushes one result without consuming initial operands.
-    /// Complexity: O(capture construction).
+    /// Emits a callback without consuming operands and pushes R unless R is void.
+    /// Follows op's callback, ownership, and exception contract.
+    /// Complexity: O(capture construction), plus O(current stack depth) on metadata growth.
     /// Example: `auto next = std::move(b).op0<bool>([] { return true; });`.
     template <class R, class F>
     auto op0(F&& callback) && {
         return std::move(*this).template op<R>(std::forward<F>(callback));
     }
-    /// Replaces the top operand using its statically known type.
+    /// Consumes the top operand using its statically known type and pushes R unless R is void.
+    /// Follows op's callback, ownership, and exception contract.
     /// Complexity: O(compared metadata + capture construction).
     /// Example: `auto next = std::move(b).op1<bool>([](double n) { return n > 0.0; });`.
     template <class R, class F>
@@ -131,6 +150,7 @@ public:
                                                    std::make_index_sequence<1>{});
     }
     /// Consumes two older-first operands using their statically known types.
+    /// Pushes R unless R is void; follows op's callback, ownership, and exception contract.
     /// Complexity: O(compared metadata + capture construction).
     /// Example: `auto next = std::move(b).op2<double>([](double a, double b) { return a - b; });`.
     template <class R, class F>
@@ -139,6 +159,7 @@ public:
                                                    std::make_index_sequence<2>{});
     }
     /// Consumes three source-order operands using their statically known types.
+    /// Pushes R unless R is void; follows op's callback, ownership, and exception contract.
     /// Complexity: O(compared metadata + capture construction).
     /// Example: `auto next = std::move(b).op3<double>(
     /// [](double a, double b, double c) { return a - b - c; });`.

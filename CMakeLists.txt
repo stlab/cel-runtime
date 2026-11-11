@@ -30,6 +30,7 @@ cpp_library_setup(
     EXAMPLES getting_started.cpp
     DOCS_INPUTS README.md docs/get-started.md docs/execution.md docs/parity.md docs/runtime-milestone.md
     DOCS_OPTIONS "USE_MDFILE_AS_MAINPAGE = ${CMAKE_CURRENT_SOURCE_DIR}/README.md"
+        "EXCLUDE_SYMBOLS = cel::detail cel::detail::*"
         "FULL_PATH_NAMES = NO"
         "STRIP_FROM_PATH = ${CMAKE_CURRENT_SOURCE_DIR}"
         "STRIP_FROM_INC_PATH = ${CMAKE_CURRENT_SOURCE_DIR}/include"

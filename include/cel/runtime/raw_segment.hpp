@@ -22,8 +22,17 @@ struct segment_access;
 /// above the frame checkpoint, including matching canonical ownership operations.
 /// Descriptors/captures are retained; referenced external state and argument spans are borrowed.
 /// Sharing code does not make externally mutable callbacks thread-safe.
-/// Example: `raw_segment p; p.push_op0<double>([](frame&) { return 2.0; });
-/// raw_stack s; frame f(s); p.execute(f); auto n = f.pop<double>();`.
+///
+/// Store a constant and a unary operation, then execute them in one scope:
+/// @code
+/// cel::raw_segment program;
+/// program.push_op0<double>([](cel::frame&) { return 2.0; });
+/// program.push_op1<double, double>([](cel::frame&, double n) { return n * 3.0; });
+/// cel::raw_stack stack;
+/// cel::frame scope(stack);
+/// program.execute(scope);
+/// auto result = scope.pop<double>(); // 6.0; the scope's suffix is empty.
+/// @endcode
 class raw_segment {
     detail::retirement_ptr<detail::instruction_storage> _storage;
     friend struct detail::segment_access;
@@ -105,11 +114,13 @@ public:
     /// Executes in order with nonallocating runtime dispatch for reserved scalar programs.
     /// Client callback work and owning composite results have their own costs.
     /// Precondition: the trusted program's complete signatures match the live suffix.
-    /// On an exception, retires this frame's whole suffix and preserves its checkpoint prefix.
-    /// Throws logic_error if a nested frame or canonical phase is active.
-    /// Checked depth/layout failures throw.
+    /// An instruction exception retires this frame's whole suffix and preserves its prefix.
+    /// Callback exceptions propagate unchanged; cleanup does not undo external callback effects.
+    /// Throws logic_error before execution if a nested frame or canonical phase is active.
+    /// Rejected entry leaves the suffix unchanged.
     /// Complexity: O(instructions + operand/result payload work).
     /// Example: `program.execute(scope);`.
+    // [knowledge] Retain release-build depth/layout checks even for trusted instruction signatures.
     void execute(frame& scope) const;
     /// Appends an arbitrary-arity typed operation with source-order operands.
     /// The stored callback is invoked as const decay_t<F>&(frame&, Args...) and initializes R,
@@ -117,7 +128,11 @@ public:
     /// void consumes operands and produces no operand; tuple<> produces source unit.
     /// Capture ownership is independent of the input object after successful construction.
     /// Lvalue callbacks are copied; rvalue callbacks are moved into owned decayed storage.
-    /// Captures must have nonthrowing destructors; scalar metadata is prepared at append time.
+    /// References or pointers held by a capture keep their original ownership and lifetime.
+    /// The callback receives independently materialized operands after their stack owners retire;
+    /// it may use the active frame or a nested frame. Its exception propagates from execute.
+    /// Captures must have nonthrowing destructors; operands/results use value's concrete adapters.
+    /// Prepares scalar descriptors during construction, not execution.
     /// Complexity: O(arity + capture construction) time and stored space.
     /// Example: `p.push_op<double, double>([](frame&, double n) { return n * 2.0; });`.
     template <class R, class... Args, class F>
@@ -135,14 +150,14 @@ public:
             throw;
         }
     }
-    /// Appends a zero-operand operation using the arbitrary-arity primitive.
+    /// Appends a zero-operand operation under push_op's capture and invocation contract.
     /// Complexity: O(capture construction) time and space.
     /// Example: `p.push_op0<bool>([](frame&) { return true; });`.
     template <class R, class F>
     void push_op0(F&& callback) {
         push_op<R>(std::forward<F>(callback));
     }
-    /// Appends a unary operation using the arbitrary-arity primitive.
+    /// Appends a unary operation under push_op's capture and invocation contract.
     /// Complexity: O(capture construction) time and space.
     /// Example: `p.push_op1<bool, bool>([](frame&, bool b) { return !b; });`.
     template <class R, class A, class F>
@@ -150,6 +165,7 @@ public:
         push_op<R, A>(std::forward<F>(callback));
     }
     /// Appends a binary operation, with the older operand first.
+    /// Follows push_op's capture, invocation, and exception contract.
     /// Complexity: O(capture construction) time and space.
     /// Example: `p.push_op2<double, double, double>(
     /// [](frame&, double a, double b) { return a / b; });`.
@@ -158,6 +174,7 @@ public:
         push_op<R, A, B>(std::forward<F>(callback));
     }
     /// Appends a ternary operation, with operands in source order.
+    /// Follows push_op's capture, invocation, and exception contract.
     /// Complexity: O(capture construction) time and space.
     /// Example: `p.push_op3<double, double, double, double>(
     /// [](frame&, double a, double b, double c) { return a - b - c; });`.

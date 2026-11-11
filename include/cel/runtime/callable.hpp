@@ -14,9 +14,23 @@ class callable_invocation;
 /// There is no implicit lexical environment or shared invocation argument/result table.
 /// Exclusive access is required; recursive entry into the same carrier throws logic_error.
 /// Distinct carriers can nest on the caller's stack. Callback references stay caller-owned.
+/// Moves between distinct handles leave the source without code; assign a live handle before
+/// using source's borrowed accessors. Borrowed signatures and requirements remain valid while
+/// an unchanged live handle retains their code.
 /// Last ownership retires runtime-managed executable graphs without allocation or recursive
 /// descent, including callable literals and lazy bodies. Client destructors retain their costs.
-/// Example: `callable fn(std::move(builder).finish(), parameters); auto v = fn.call(stack, args);`.
+///
+/// Bind a declared parameter and call through a shared handle:
+/// @code
+/// cel::dyn_segment builder;
+/// builder.push_argument(0, cel::native_type<double>());
+/// const auto parameters = std::array{cel::native_type<double>()};
+/// cel::callable fn(std::move(builder).finish(), parameters);
+/// auto alias = fn;
+/// cel::raw_stack stack;
+/// const auto arguments = std::array{cel::value::from(2.0)};
+/// auto result = alias.call(stack, arguments); // result.as<double>() == 2.0.
+/// @endcode
 class callable {
     detail::retirement_ptr<detail::callable_state> _state;
     friend struct detail::callable_access;
@@ -24,7 +38,9 @@ class callable {
 
 public:
     /// Binds independent one-result code and every explicit source-order parameter.
-    /// Unused declarations remain parameters. Parameters admit bool/f64 and their composites;
+    /// Precondition: body has not been moved from.
+    /// Retains code and copies parameter descriptors; the span need not outlive construction.
+    /// Unused declarations remain parameters. Parameters admit bool/double and their composites;
     /// results admit every complete owned type, including client leaves and installed callables.
     /// Throws invalid_argument for dependent origin, undeclared/wrong reads, or invalid types.
     /// Complexity: O(parameters + compared metadata) time and frozen binding space.
@@ -37,10 +53,12 @@ public:
     /// Example: `auto moved = std::move(fn);`.
     callable(callable&&) noexcept = default;
     /// Shares the handle and releases the previous code on last ownership.
+    /// Leaves the source unchanged; self-copy is unchanged.
     /// Complexity: O(last-owned captures and binding metadata).
     /// Example: `alias = fn;`.
     callable& operator=(const callable&) noexcept = default;
     /// Transfers the handle and releases previous last-owned code.
+    /// Leaves a distinct source without code; self-move is unchanged.
     /// Complexity: O(last-owned captures and binding metadata).
     /// Example: `alias = std::move(fn);`.
     callable& operator=(callable&&) noexcept = default;
@@ -57,10 +75,12 @@ public:
     const stack_requirements& requirements() const noexcept;
     /// Validates arity and every declared complete parameter before any body effect.
     /// Returns one independent result owner; arguments are borrowed and not consumed.
-    /// Throws invalid_argument on any signature mismatch and logic_error on same-carrier entry.
+    /// Throws std::invalid_argument on any signature mismatch and std::logic_error for a moved-from
+    /// handle, same-carrier entry, or stack access during a canonical ownership phase.
     /// Same-carrier exclusion covers validation, storage acquisition, body work, and result
     /// extraction. Exceptions preserve their context and retire only the execution suffix.
     /// Callbacks must not mutate aliases of arguments while this call borrows them.
+    /// Returned aggregates own independent payloads; callable components share code.
     /// Complexity: O(parameters + compared metadata + executed payload work) time;
     /// allocates an invocation table and result outer storage, not per-scalar argument boxes.
     /// Example: `auto result = fn.call(stack, std::array{value::from(2.0)});`.
@@ -70,10 +90,11 @@ public:
     /// Complexity: O(1) allocations for carrier and canonical outer storage.
     /// Example: `auto carrier = fn.to_value();`.
     value to_value() const;
-    /// Receives an installed owning callable value through public headers.
-    /// Throws invalid_argument for a different complete shape or ownership representation.
+    /// Returns a shared handle to the installed callable stored in source.
+    /// Throws std::invalid_argument if source is not a callable with runtime-installed ownership.
     /// The returned handle shares the value's reference-semantic code and entry guard.
-    /// Complexity: O(compared signature metadata); no payload clone.
+    /// Leaves source unchanged and retains code independently of source's lifetime.
+    /// Performs no payload clone or recursive signature comparison.
     /// Example: `auto fn = callable::from_value(factory.call(stack, {}));`.
     static callable from_value(const value& source);
 };

@@ -8,8 +8,9 @@
 #include <vector>
 
 namespace cel {
-/// Identifies a dependent fragment's ambient byte cursor and live-slot depth.
+/// Identifies the byte cursor and live-slot depth below a fragment's local operands.
 /// Both coordinates must match; zero-byte prefixes still contribute live slots.
+/// Defaults to zero bytes and zero slots, the origin admitted for independent execution.
 /// Example: `dyn_segment rhs(parent.before_top());`.
 struct stack_origin {
     std::size_t bytes = 0; ///< Gives the ambient canonical cursor.
@@ -26,6 +27,7 @@ template <class R, class... Args>
 class prepared_segment;
 
 /// Describes total caller storage and slot capacity for one prefixed execution.
+/// Both fields include the live caller prefix; neither counts separately owned composite payloads.
 /// Example: `stack.reserve(r.bytes.size, r.bytes.alignment); stack.reserve_depth(r.slots);`.
 struct stack_reservation {
     layout bytes;      ///< Gives total byte capacity and required alignment.
@@ -34,6 +36,7 @@ struct stack_reservation {
 
 /// Describes statically known canonical frame storage for a frozen ordinary program.
 /// Extent and slots are peak simultaneous requirements, not cumulative instruction costs.
+/// Defaults to alignment one with no frame bytes or live slots.
 /// Composite payload allocations, concrete callback temporaries, and arbitrary callback or
 /// nested external stack work are not inferred. Result destinations remain caller-owned.
 /// Example: `auto r = program.requirements().for_prefix(stack.cursor(), stack.depth());`.
@@ -207,9 +210,15 @@ requires(detail::signature_binding<Signature, std::decay_t<F>>::available) auto 
 }
 
 /// Checks stack effects while constructing a move-only ordinary operation sequence.
-/// Operations consume older-first exact operands; exceptions replace Result-shaped transport.
+/// Operations consume older-first exact operands and report runtime failures with exceptions.
 /// Successful finish freezes captures and descriptors independently of builder lifetime.
+/// Owned callbacks retain their captures; referenced external state stays caller-owned.
+/// Destruction releases unfinished captures and metadata.
+/// Complexity: destruction takes O(owned captures, metadata, and client destructor work).
+/// Emission costs include amortized O(1) instruction bookkeeping and, on logical stack growth,
+/// O(current stack depth) metadata transfer in addition to each operation's stated costs.
 /// Example: `dyn_segment b; b.just(value::from(2.0)); auto p = std::move(b).finish();`.
+/// See the runtime.hpp example for complete construction, preparation, reservation, and execution.
 class dyn_segment {
     raw_segment _body;
     std::vector<value_type> _stack;
@@ -245,8 +254,9 @@ public:
     /// Example: `dyn_segment builder;`.
     dyn_segment() = default;
     /// Creates an empty dependent fragment at the supplied ambient origin.
-    /// Dependent fragments cannot execute or prepare independently, even after static ascription.
-    /// Throws overflow_error when subsequent emission cannot represent absolute cursor/depth.
+    /// A nonzero byte or depth origin prevents independent execution or preparation after finish.
+    /// This constructor does no accounting; subsequent emission reports unrepresentable
+    /// absolute cursor/depth with std::overflow_error.
     /// Example: `dyn_segment branch(parent.before_top());`.
     explicit dyn_segment(stack_origin origin) : _origin(origin) {}
     /// Disallows copying mutable construction ownership.
@@ -254,8 +264,10 @@ public:
     /// Disallows copied assignment.
     dyn_segment& operator=(const dyn_segment&) = delete;
     /// Transfers construction ownership.
+    /// Use the source only for destruction or assignment after moving.
     dyn_segment(dyn_segment&&) noexcept = default;
     /// Transfers construction ownership, releasing prior captures and metadata.
+    /// Use the source only for destruction or assignment after moving, including self-move.
     /// Complexity: O(old captures and metadata).
     dyn_segment& operator=(dyn_segment&&) noexcept = default;
     /// Returns the retained ambient origin.
@@ -285,12 +297,14 @@ public:
     /// Example: `dyn_segment then_body(builder.before_top());`.
     stack_origin before_top() const;
     /// Packs count source-ordered operands into an exact owning tuple at ambient.
+    /// Count zero emits source unit. Execution transfers children without cloning them.
     /// Throws invalid_argument for missing operands or wrong byte/depth origin before effects.
     /// Throws overflow_error for canonical layout/accounting overflow.
     /// Complexity: O(count + compared metadata) construction; O(count + outer bytes) execution.
     /// Example: `builder.make_tuple(2, stack_origin{});`.
     void make_tuple(std::size_t count, stack_origin ambient);
     /// Packs exact element operands into one owning packed array, including typed empty arrays.
+    /// Requires element ownership capability even when count is zero; execution transfers children.
     /// Throws invalid_argument for count, complete element mismatch, ownership, or ambient origin.
     /// Throws overflow_error for extent/accounting overflow.
     /// Complexity: O(count + compared metadata) construction; O(count + element bytes) execution.
@@ -302,6 +316,8 @@ public:
     /// Example: `builder.make_record(schema, {});`.
     void make_record(value_type record, stack_origin ambient);
     /// Packs source-position to schema-position fields without reordering expression execution.
+    /// Each permutation[i] gives the schema position of source operand i, one entry per field.
+    /// Copies the map and retains record; neither input must outlive construction.
     /// Throws invalid_argument for non-record, wrong origin/types, or incomplete/nonbijective map.
     /// Throws overflow_error for extent/accounting overflow. Validation precedes publication.
     /// Complexity: O(fields + compared metadata) construction; O(fields + outer bytes) execution.
@@ -322,9 +338,9 @@ public:
     /// Consumes an array followed by an f64 index and transfers only the selected element.
     /// Throws invalid_argument for operand shape before publication; execution throws out_of_range
     /// for nonfinite, negative, fractional, unrepresentable, or out-of-bounds indices.
-    /// Representability precedes the size_t cast; exact integer bounds precede child access.
     /// Complexity: O(compared metadata) construction; O(siblings + ownership work) execution.
     /// Example: `builder.just(value::from(0.0)); builder.index_array();`.
+    // [knowledge] Check representability before the size_t cast, then exact bounds before access.
     void index_array();
     /// Packs source-ordered f64 endpoints into the complete specified range; full consumes none.
     /// Throws invalid_argument for kind or wrong operands; overflow_error for canonical accounting.
@@ -333,24 +349,26 @@ public:
     /// Example: `builder.make_range(range_kind::range_full);`.
     void make_range(range_kind kind);
     /// Consumes bool and executes only one exact one-result dependent fragment.
-    /// Bodies must originate immediately below the condition, with no local preloaded operands.
+    /// Bodies must originate immediately below the condition and each leave exactly one result.
     /// All reads in both bodies are registered and preflighted before parent execution effects.
     /// Throws invalid_argument for condition, origin, result/read mismatch before publication.
-    /// Throws overflow_error for accounting. Reservations use maximum selected-body demand.
-    /// Complexity: O(body read metadata + compared plans) construction; O(selected body) execution.
+    /// Throws overflow_error for accounting. Reservations use the maximum of both bodies' demands.
+    /// Complexity: O(P + B * (P + B) + compared metadata) time and O(P + B) read space,
+    /// for P parent reads and B combined body reads; O(selected body work) execution.
     /// Example: `builder.if_else(std::move(yes), std::move(no));`.
     void if_else(dyn_segment then_body, dyn_segment else_body);
     /// Executes bool rhs only if the bool left operand is true.
     /// Follows if_else's origins, shared-read preflight, exceptions, and maximum-demand contracts.
-    /// Complexity: O(rhs read metadata) construction; O(selected rhs work) execution.
+    /// Complexity: follows if_else for parent/rhs read merging; O(selected rhs work) execution.
     /// Example: `builder.logical_and(std::move(rhs));`.
     void logical_and(dyn_segment rhs);
     /// Executes bool rhs only if the bool left operand is false.
     /// Follows if_else's origins, shared-read preflight, exceptions, and maximum-demand contracts.
-    /// Complexity: O(rhs read metadata) construction; O(selected rhs work) execution.
+    /// Complexity: follows if_else for parent/rhs read merging; O(selected rhs work) execution.
     /// Example: `builder.logical_or(std::move(rhs));`.
     void logical_or(dyn_segment rhs);
     /// Emits an installed callable retaining explicit parameters and independent frozen code.
+    /// Precondition: body has not been moved from.
     /// Throws invalid_argument for dependent body, invalid parameters, or undeclared/wrong reads.
     /// Throws overflow_error for canonical accounting. Results admit all complete owning types.
     /// Complexity: O(parameters + compared metadata) construction; O(1) carrier clone execution.
@@ -366,7 +384,7 @@ public:
     /// execution. Invocation allocates packed outer staging, pointer tables, and result storage,
     /// not scalar boxes. Example: `builder.invoke_closure(2);`.
     void invoke_closure(std::size_t arity);
-    /// Emits an owned clone of a borrowed positional input.
+    /// Emits a read that clones a borrowed positional input when the program executes.
     /// Repeated declarations must have identical complete shapes and ownership plans.
     /// Throws invalid_argument for incompatible repeated declarations or missing clone capability.
     /// Throws std::overflow_error for canonical frame extent or depth overflow.
@@ -375,6 +393,7 @@ public:
     /// Example: `builder.push_argument(0, value_type::leaf<double>());`.
     void push_argument(std::size_t index, value_type type);
     /// Retains a literal owner and emits an independent clone on every execution.
+    /// Callable components share code under value's copy semantics rather than copying captures.
     /// Throws invalid_argument if the complete value cannot be cloned.
     /// Throws std::overflow_error for canonical frame extent or depth overflow.
     /// Complexity: O(metadata admission) time, plus O(current stack depth) metadata transfer
@@ -390,6 +409,9 @@ public:
     /// Callbacks return R or a reference to R; no implicit result conversion is admitted.
     /// Callbacks may reference caller-owned state; freezing does not make it thread-safe.
     /// Lvalue callbacks are copied; rvalue callbacks are moved into owned decayed storage.
+    /// Callback captures must have nonthrowing destructors; referenced objects must outlive uses.
+    /// Execution consumes the declared operands, invokes the callback, then publishes its result.
+    /// Callback exceptions propagate through the execution interface after suffix cleanup.
     /// Over-aligned callback operands use reference parameters on MSVC.
     /// Throws invalid_argument for current stack mismatch before publishing an opcode.
     /// Throws std::overflow_error for canonical frame extent or depth overflow.
@@ -414,28 +436,32 @@ public:
             });
         apply_operation(sizeof...(Args), outputs, effect);
     }
-    /// Pushes a zero-operand result; follows op's validation and exception contract.
+    /// Emits a zero-operand callback; void produces no value, otherwise pushes one result.
+    /// Follows op's callback, validation, and exception contract.
     /// Complexity: O(capture construction), plus O(current stack depth) on metadata growth.
     /// Example: `builder.op0<double>([] { return 2.0; });`.
     template <class R, class F>
     requires(detail::exact_callback<F, R>()) void op0(F&& callback) {
         op<R>(std::forward<F>(callback));
     }
-    /// Replaces one exact operand; follows op's validation and exception contract.
+    /// Consumes one exact operand and pushes R unless R is void.
+    /// Follows op's callback, validation, and exception contract.
     /// Complexity: O(compared metadata + capture construction).
     /// Example: `builder.op1<bool, bool>([](bool b) { return !b; });`.
     template <class R, class A, class F>
     requires(detail::exact_callback<F, R, A>()) void op1(F&& callback) {
         op<R, A>(std::forward<F>(callback));
     }
-    /// Consumes two operands older-first; follows op's validation and exception contract.
+    /// Consumes two operands older-first and pushes R unless R is void.
+    /// Follows op's callback, validation, and exception contract.
     /// Complexity: O(compared metadata + capture construction).
     /// Example: `builder.op2<double, double, double>([](double a, double b) { return a - b; });`.
     template <class R, class A, class B, class F>
     requires(detail::exact_callback<F, R, A, B>()) void op2(F&& callback) {
         op<R, A, B>(std::forward<F>(callback));
     }
-    /// Consumes three source-order operands; follows op's validation and exception contract.
+    /// Consumes three source-order operands and pushes R unless R is void.
+    /// Follows op's callback, validation, and exception contract.
     /// Complexity: O(compared metadata + capture construction).
     /// Example: `builder.op3<double, double, double, double>(
     /// [](double a, double b, double c) { return a + b + c; });`.
@@ -444,17 +470,23 @@ public:
         op<R, A, B, C>(std::forward<F>(callback));
     }
     /// Freezes exactly one result, mapping an empty final stack to source unit.
+    /// Retains the ambient origin; finishing does not make a dependent fragment independent.
     /// Throws invalid_argument for leftover operands instead of discarding them.
     /// Complexity: O(1), except allocation and source-unit emission.
     /// Example: `auto program = std::move(builder).finish();`.
     compiled_segment finish() &&;
 };
 
-/// Shares deliberately reference-semantic immutable code and frozen captures.
-/// Handles are move-only; factories retain the engine after this handle is destroyed.
+/// Retains immutable frozen code and its captures in a move-only handle.
+/// Prepared bindings and callables retain the code after this handle is destroyed.
 /// Captures are never copied as independent values; external referenced state stays caller-owned.
+/// Moves between distinct handles leave the source without code; assign a live handle before
+/// using borrowed accessors.
+/// Borrowed results, requirements, and read views remain valid while unchanged code ownership
+/// retains them. Execution requires exclusive access to its stack and any mutable callback state.
 /// Last ownership retires managed captures and nested executable bodies without allocation or
 /// nesting-dependent stack. Arbitrary client capture destructors retain their own costs.
+/// Complexity: last release takes O(released code nodes/edges + metadata + client destructor work).
 /// Example: `auto prepared = program.prepare<double, double>();`.
 class compiled_segment {
     detail::retirement_ptr<const detail::frozen_program> _program;
@@ -472,9 +504,11 @@ public:
     /// Transfers the frozen handle.
     compiled_segment(compiled_segment&&) noexcept = default;
     /// Transfers the handle and releases prior code when uniquely owned.
+    /// Self-move leaves this handle unchanged.
     /// Complexity: O(prior captures and metadata on last release).
     compiled_segment& operator=(compiled_segment&&) noexcept = default;
     /// Returns the complete frozen result descriptor.
+    /// The reference borrows retained code; copying the descriptor retains its metadata.
     /// Precondition: this handle has not been moved from.
     /// Example: `auto type = program.result_type();`.
     const value_type& result_type() const noexcept;
@@ -487,25 +521,44 @@ public:
     /// Precondition: this handle is live.
     /// Example: `program.origin() == stack_origin{}`.
     stack_origin origin() const noexcept;
-    /// Borrows emitted read requirements; absent positional inputs are unused.
+    /// Borrows one requirement per distinct emitted argument index; absent inputs are unused.
+    /// Each entry exposes index (the source-order argument position) and type (the complete
+    /// descriptor). Entries are read declarations, not a dense positional argument array.
     /// Precondition: this handle has not been moved from.
-    /// Example: `auto reads = program.argument_reads();`.
+    /// The view borrows frozen code; copy descriptors to keep metadata independently.
+    /// Inspect entries without naming their implementation type:
+    /// @code
+    /// for (const auto& read : program.argument_reads()) {
+    ///     auto position = read.index;
+    ///     auto required_type = read.type; // Retains metadata independently.
+    /// }
+    /// @endcode
     std::span<const detail::argument_read> argument_reads() const noexcept;
     /// Validates all actual read witnesses before effects and returns an independent owner.
     /// Extra unused inputs are permitted and are not materialized.
+    /// Borrows arguments for the call; callbacks must not mutate their owners or owned payloads.
     /// Throws invalid_argument for dependent origin or missing/incompatible read types/ownership.
+    /// Throws std::logic_error for a moved-from handle or canonical-phase stack reentry.
     /// Callback/acquisition exceptions propagate after nonallocating suffix cleanup.
+    /// Preserves the caller's stack prefix, not external callback effects.
+    /// Returned callable components retain reference-semantic code.
     /// Complexity: O(read validation + executed instructions + payload work) time and result space.
     /// Example: `auto result = program.execute(stack, inputs);`.
     value execute(raw_stack& stack, std::span<const value> arguments) const;
     /// Binds complete runtime shapes and ownership plans once.
+    /// Retains copied argument/result descriptors and frozen code, not the supplied spans.
+    /// Checks only emitted argument positions; unused descriptors need not support ownership.
     /// Throws invalid_argument for dependent origin, undeclared reads, types, or absent ownership.
+    /// Throws std::logic_error for a moved-from handle.
     /// Complexity: O(arguments + distinct compared metadata pairs) time and binding space.
     /// Example: `auto bound = program.prepare_raw(types, program.result_type());`.
     prepared_raw_segment prepare_raw(std::span<const value_type> arguments,
                                      const value_type& result) const;
     /// Binds exact recursive concrete adapters once, admitting valid client leaves at roots.
+    /// R must not be void; use std::tuple<> for a source-unit result.
+    /// Unused declared arguments are accepted and are not converted during calls.
     /// Throws invalid_argument for incompatible argument/result shapes or undeclared reads.
+    /// Follows prepare_raw's dependent-origin and moved-from errors.
     /// Complexity: O(arity + distinct compared metadata pairs) time and binding space.
     /// Example: `auto bound = program.prepare<double, double>();`.
     template <class R, class... Args>
@@ -515,7 +568,27 @@ public:
 /// Retains a move-only, reference-semantic frozen canonical execution binding.
 /// No call compares descriptors, converts operands, or allocates scalar public owner boxes.
 /// Referenced callback state remains caller-owned and supplies its own synchronization.
-/// Example: `bound.call_into(stack, borrowed_inputs, result_bytes);`.
+/// Borrowed descriptor views remain valid until this binding is moved, assigned, or destroyed.
+/// After moving, use the source only for destruction or assignment, including after self-move.
+/// Destruction releases retained code and metadata.
+/// Complexity: last release takes O(released code nodes/edges + metadata + client destructor work).
+///
+/// Supply native leaf bytes, then retire the successful result before releasing its buffer:
+/// @code
+/// cel::dyn_segment builder;
+/// builder.push_argument(0, cel::native_type<double>());
+/// auto program = std::move(builder).finish();
+/// const auto type = cel::native_type<double>();
+/// auto bound = program.prepare_raw(std::array{type}, type);
+/// double input = 2.0;
+/// const std::array inputs{
+///     cel::borrowed_value{type, reinterpret_cast<const std::byte*>(&input)}};
+/// alignas(double) std::array<std::byte, sizeof(double)> result_bytes{};
+/// cel::raw_stack stack;
+/// bound.call_into(stack, inputs, result_bytes.data());
+/// auto result = std::bit_cast<double>(result_bytes); // 2.0.
+/// bound.destroy_result(result_bytes.data());
+/// @endcode
 class prepared_raw_segment {
     detail::retirement_ptr<const detail::frozen_program> _program;
     std::vector<value_type> _arguments;
@@ -543,9 +616,11 @@ public:
     /// Complexity: O(old argument metadata and last-owned captures).
     prepared_raw_segment& operator=(prepared_raw_segment&&) noexcept = default;
     /// Borrows prepared source-order argument descriptors.
+    /// Includes unused declarations; the returned span does not retain the binding.
     /// Example: `auto arity = bound.argument_types().size();`.
     std::span<const value_type> argument_types() const noexcept { return _arguments; }
     /// Borrows the complete frozen result descriptor.
+    /// Copy the descriptor to retain its metadata independently of the binding.
     /// Example: `auto extent = bound.result_type().byte_layout();`.
     const value_type& result_type() const noexcept { return _result; }
     /// Borrows the frozen program's canonical frame reservation requirements.
@@ -561,6 +636,8 @@ public:
     /// Destination is uninitialized, aligned, disjoint storage of result_type().byte_layout();
     /// null is permitted for every zero-byte layout. The caller exclusively owns success.
     /// On an exception, destination remains uninitialized and the execution suffix is retired.
+    /// Callback exceptions propagate unchanged; cleanup preserves the caller prefix, not
+    /// external callback effects. Stack access during a canonical phase throws std::logic_error.
     /// Scalar dispatch allocates nothing on a sufficiently reserved caller stack.
     /// Complexity: O(argument slots + executed instructions + payload work).
     /// Example: `bound.call_into(stack, inputs, destination);`.
@@ -571,6 +648,7 @@ public:
     /// Safety preconditions: result is a live exclusively owned result from this binding;
     /// its aligned complete extent remains valid and has not been retired or byte-transferred.
     /// Never call this after failed execution. The binding outlives retirement.
+    /// Leaves the buffer uninitialized and caller-owned; do not retire the same result twice.
     /// Complexity: O(visited ownership paths and array nodes); no allocation or throwing.
     /// Example: `bound.destroy_result(destination);`.
     void destroy_result(std::byte* result) const noexcept;
@@ -636,7 +714,11 @@ public:
 /// Leaves use direct addresses/result bytes; tuples/vectors use trusted canonical adapters.
 /// Composite conversion/result ownership may allocate; no recursive checks occur during calls.
 /// Handles share immutable engine state, not independent copies of mutable captures.
+/// After moving, use the source only for destruction or assignment, including after self-move.
+/// Destruction releases the binding and code.
+/// Complexity: last release takes O(released code nodes/edges + metadata + client destructor work).
 /// Example: `auto result = bound.call(stack, 2.0);`.
+/// See the runtime.hpp example for a complete typed call and stack reservation.
 template <class R, class... Args>
 class prepared_segment {
     prepared_raw_segment _binding;
@@ -678,6 +760,7 @@ public:
     /// Executes with borrowed const inputs and returns a disjoint result.
     /// Precondition: the handle is live, and inputs have no mutable alias accessed by callbacks.
     /// Exceptions propagate after suffix cleanup; inputs and caller prefix remain owned.
+    /// Cleanup does not undo external callback effects.
     /// Scalar calls allocate nothing on a warmed sufficiently reserved stack.
     /// Complexity: O(arity + instructions + payload work) time and independent result space.
     /// Example: `bound.call(stack, 2.0)`.

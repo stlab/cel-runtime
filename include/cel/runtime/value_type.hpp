@@ -45,6 +45,10 @@ struct type_access;
 /// Leaf identity is concrete C++ type identity; records additionally retain their nominal
 /// identity and field names. Capabilities do not change semantic identity.
 /// Copies share immutable metadata, never mutable value payloads.
+/// Borrowed references, spans, and string views remain valid while a descriptor retaining
+/// their metadata remains alive. Keep this descriptor unchanged while using its views.
+/// Factories retain component descriptors and copy supplied names; input spans and strings
+/// need not outlive construction. See the example for value for record construction.
 /// Example: `auto numbers = value_type::array(value_type::leaf<double>());`.
 class value_type {
     friend struct detail::type_access;
@@ -61,14 +65,16 @@ class value_type {
 public:
     /// Creates the empty tuple descriptor (source unit).
     value_type();
-    /// Shares immutable metadata.
+    /// Shares the source's immutable metadata without changing the source.
     value_type(const value_type&) noexcept = default;
-    /// Shares immutable metadata and leaves the source descriptor valid.
+    /// Shares the source's immutable metadata, leaving its shape and capabilities unchanged.
     value_type(value_type&& other) noexcept : _plan(other._plan) {}
-    /// Shares immutable metadata and releases prior unique plans without allocating.
+    /// Replaces this descriptor with the source's shape and capabilities; self-assignment is valid.
+    /// Leaves the source unchanged and releases prior unique metadata without allocating.
     /// Complexity: O(released plans + edges + name bytes) time and O(1) auxiliary space.
     value_type& operator=(const value_type& other) noexcept;
-    /// Shares immutable metadata and leaves the source descriptor valid.
+    /// Shares the source's shape and capabilities and releases this descriptor's prior metadata.
+    /// Leaves the source unchanged; self-move leaves this descriptor unchanged.
     /// Complexity: O(released prior plans + edges + name bytes) time and O(1) auxiliary space.
     value_type& operator=(value_type&& other) noexcept {
         return *this = static_cast<const value_type&>(other);
@@ -77,7 +83,8 @@ public:
     /// Complexity: O(released plans + edges + name bytes) time and O(1) auxiliary space.
     ~value_type();
 
-    /// Registers T as an opaque, trivially copyable leaf; rejects nontrivial T at compile time.
+    /// Returns T's descriptor as an opaque, trivially copyable leaf.
+    /// Rejects nontrivial T at compile time.
     /// This does not infer equality or ownership of objects referenced by T.
     /// Example: `auto boolean = value_type::leaf<bool>();`.
     template <class T>
@@ -87,15 +94,18 @@ public:
         static const value_type descriptor = make_leaf(typeid(T), {sizeof(T), alignof(T)});
         return descriptor;
     }
-    /// Creates an owning array descriptor, retaining the complete element shape.
+    /// Creates an array descriptor retaining the element's complete shape and capabilities.
+    /// Reports owns_values() exactly when element does; constructing a type creates no values.
     /// Example: `auto type = value_type::array(value_type::leaf<bool>());`.
     static value_type array(value_type element);
-    /// Creates canonical source-order fields; empty fields describe source unit.
+    /// Creates a tuple descriptor with canonical source-order fields; empty fields describe unit.
+    /// Retains every field's complete shape and ownership capabilities.
     /// Throws std::overflow_error if the canonical extent overflows.
     /// Complexity: O(field count) construction time and metadata space.
     /// Example: `auto unit = value_type::tuple({});`.
     static value_type tuple(std::span<const value_type> fields);
     /// Creates named fields with a nonempty nominal identity.
+    /// Copies identity and field names, retaining each field's complete descriptor in source order.
     /// Throws std::invalid_argument for empty identity/names or duplicate field names.
     /// Throws std::overflow_error for canonical layout overflow.
     /// Complexity: O(field count + name bytes) expected time and metadata space.
@@ -103,14 +113,19 @@ public:
     static value_type record(std::string_view identity, std::span<const record_field> fields);
     /// Creates a range with a concrete leaf endpoint and the specified source form.
     /// Throws std::invalid_argument for a non-leaf endpoint or invalid form.
+    /// Throws std::overflow_error for canonical endpoint layout overflow.
+    /// Bounded forms store two endpoints, one-sided forms store one, and full stores none.
     /// Example: `auto type = value_type::range(range_kind::range, value_type::leaf<double>());`.
     static value_type range(range_kind form, value_type endpoint);
-    /// Creates a complete signature with built-in/composite parameters and any valid result.
+    /// Creates a callable signature with bool/double parameters or composites of those leaves.
+    /// Retains any complete result descriptor, but installs no callable ownership operations.
+    /// Use bind_runtime_ownership when emission needs an ownership-capable signature.
     /// Throws std::invalid_argument if a parameter contains a client leaf or callable.
     /// Complexity: O(parameter count) time and metadata space; predicates are cached per plan.
     /// Example: `auto signature = value_type::callable({}, value_type::leaf<bool>());`.
     static value_type callable(std::span<const value_type> parameters, value_type result);
-    /// Compares complete identities, shapes, source ordering, and canonical layouts.
+    /// Returns true exactly when identities, shapes, source ordering, and canonical layouts match.
+    /// Ignores ownership capabilities; use compatible_with to admit stored representations.
     /// Complexity: O(distinct visited plan pairs, their edges, and name bytes) expected time
     /// and O(distinct visited plan pairs) auxiliary space; shared DAGs are not expanded.
     /// Example: `value_type::leaf<bool>().same_shape(value_type::leaf<double>()) == false`.
@@ -131,7 +146,8 @@ public:
     /// Returns the canonical byte extent and alignment.
     /// Example: `value_type{}.byte_layout().size == 0`.
     layout byte_layout() const noexcept;
-    /// Reports whether clone/destruction capabilities exist for every inhabited component.
+    /// Returns whether clone/destruction capabilities exist for every inhabited component.
+    /// This describes capabilities, not the presence of initialized bytes.
     /// Callable ownership is unavailable until code ownership is installed.
     /// Example: `value_type::leaf<double>().owns_values() == true`.
     bool owns_values() const noexcept;
@@ -164,17 +180,17 @@ public:
     const value_type& result() const;
 };
 
-/// Defines a named source-order record component.
+/// Supplies a source-order name/type pair to value_type::record, which validates its name.
 /// Example: `record_field{"enabled", value_type::leaf<bool>()}`.
 struct record_field {
-    std::string name; ///< Stores a nonempty name unique within its record.
+    std::string name; ///< Supplies a name; record construction rejects empty or duplicate names.
     value_type type;  ///< Retains the complete field descriptor.
 };
 
 /// Returns a runtime ownership-capable witness for the complete immutable type graph.
 /// Preserves semantic identity, layout, names, ordering, parameter admission, and results.
 /// Binds deferred callables, including nested results, to the runtime's canonical carrier
-/// operations; retains already canonical owners and shares unchanged metadata.
+/// operations; retains already installed canonical ownership and shares unchanged metadata.
 /// The input remains unchanged. Binding creates no live callable, body, or initialized bytes
 /// and invokes no ownership operations. Repeated binding is representation-compatible.
 /// Throws std::invalid_argument for foreign or incompatible installed callable operations

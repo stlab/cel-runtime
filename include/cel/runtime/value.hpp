@@ -36,9 +36,22 @@ struct concrete_adapter;
 /// callback references, and the carrier's recursive-entry guard, not mutable aggregate payloads.
 /// Moved-from and default values are source unit. Internal descriptors may be shared.
 /// Opaque leaves own their bytes, not objects reachable through client pointers.
-/// Public wrappers must never be byte-relocated; private carriers transfer one owner.
 /// Composite admission rejects incompatible opaque ownership operations even for equal shapes.
 /// Example: `auto number = value::from(2.0); auto copy = number;`.
+///
+/// Create a record and change a copied field without changing the original:
+/// @code
+/// const auto fields =
+///     std::array{cel::record_field{"enabled", cel::native_type<bool>()}};
+/// const auto schema = cel::value_type::record("settings", fields);
+/// auto original =
+///     cel::value::record(schema, std::array{cel::value::from(false)});
+/// auto copy = original;
+/// copy.set_field("enabled", cel::value::from(true));
+/// auto enabled = copy.field("enabled").as<bool>(); // true.
+/// // original.field("enabled").as<bool>() remains false.
+/// @endcode
+// [knowledge] Never byte-relocate public wrappers; only private canonical carriers transfer owners.
 class value {
     std::unique_ptr<detail::owned_payload> _payload;
     friend struct detail::value_access;
@@ -101,7 +114,8 @@ public:
     value(const value& other);
     /// Transfers ownership and leaves other as source unit.
     value(value&& other) noexcept;
-    /// Replaces ownership with an independent copy, including self-assignment.
+    /// Replaces this value with a copy under the class's aggregate and callable copy semantics.
+    /// Leaves other unchanged; self-assignment leaves this value unchanged.
     /// Failure leaves this unchanged without copying its prior payload.
     /// Complexity: O(canonical source bytes + visited source/old ownership paths) time
     /// and O(source payload size) new owned space.
@@ -112,15 +126,17 @@ public:
     /// Borrows the complete descriptor until this value is assigned or destroyed.
     /// Example: `value::from(true).type().kind() == type_kind::leaf`.
     const value_type& type() const;
-    /// Copies a concrete leaf or owning vector/tuple through its trusted adapter.
+    /// Copies a concrete leaf or recursively nested owning vector/tuple into a runtime value.
     /// Nontrivial opaque leaves fail compilation; vector/tuple facades are supported.
+    /// Leaves source unchanged; pointer members in opaque leaves do not confer pointee ownership.
     /// Complexity: O(payload size) time and owned space.
     /// Example: `auto numbers = value::from(std::vector<double>{1.0, 2.0});`.
     template <class T>
     static value from(const T& source) {
         return detail::concrete_adapter<std::remove_cv_t<T>>::from(source);
     }
-    /// Returns an independent concrete copy through its trusted adapter.
+    /// Returns a concrete copy of the exact requested leaf, vector, or tuple type.
+    /// Returned vectors and tuples own independent mutable payloads; leaf pointers remain pointers.
     /// Throws std::invalid_argument if the complete concrete type does not match.
     /// Complexity: O(payload size) time and owned result space.
     /// Example: `value::from(2.0).as<double>() == 2.0`.
@@ -128,25 +144,28 @@ public:
     T as() const {
         return detail::concrete_adapter<std::remove_cv_t<T>>::as(*this);
     }
-    /// Copies a sequence of exactly the specified element shape.
-    /// Throws std::invalid_argument for a mismatched element, releasing earlier copies.
+    /// Copies a sequence of elements with the specified complete shape and ownership operations.
+    /// Retains element for an empty sequence; leaves all input values unchanged.
+    /// Throws std::invalid_argument for incompatible elements, releasing earlier copies.
     /// Throws std::overflow_error if count times canonical element extent overflows.
     /// Complexity: O(payload size + element count) time and owned space.
     /// Example: `auto empty = value::array(value_type::leaf<double>(), {});`.
     static value array(value_type element, std::span<const value> elements);
     /// Copies source-order fields into a canonical tuple; empty fields are source unit.
+    /// Leaves input fields unchanged, with the class's copy semantics for every component.
     /// Throws std::overflow_error for layout overflow.
     /// Complexity: O(payload size + field count) time and owned space.
     /// Example: `auto unit = value::tuple({});`.
     static value tuple(std::span<const value> fields);
-    /// Copies a record of the specified nominal type.
-    /// Throws std::invalid_argument for a non-record, wrong arity, or wrong field type.
+    /// Copies source-order fields into a record of the specified nominal type.
+    /// Throws std::invalid_argument for a non-record, wrong arity, or incompatible fields.
+    /// Field compatibility includes complete shape and ownership operations.
     /// Failure releases earlier children without leaking resources.
     /// Complexity: O(payload size + field count) time and owned space.
     /// Example: `auto empty = value::record(value_type::record("sample", {}), {});`.
     static value record(value_type type, std::span<const value> fields);
     /// Copies endpoints in source order for the given range descriptor.
-    /// Throws std::invalid_argument for a non-range, wrong arity, or wrong endpoint type.
+    /// Throws std::invalid_argument for a non-range, wrong arity, or incompatible endpoint type.
     /// Complexity: O(endpoint byte size) time and owned space.
     /// Example: `auto full = value::range(value_type::range(
     ///     range_kind::range_full, value_type::leaf<double>()), {});`.
@@ -155,12 +174,13 @@ public:
     /// Throws std::invalid_argument for leaves or callables.
     /// Example: `value::tuple({}).size() == 0`.
     std::size_t size() const;
-    /// Copies a source-order child independently.
+    /// Copies a source-order child under the class's aggregate and callable copy semantics.
     /// Throws std::out_of_range for an invalid index, std::invalid_argument for non-composites.
     /// Complexity: O(child payload size) time and owned result space.
     /// Example: `value::from(std::vector<double>{2.0}).at(0).as<double>() == 2.0`.
     value at(std::size_t index) const;
-    /// Replaces one child with an independent copy of the exact expected shape.
+    /// Replaces one child with a copy of the exact expected shape and ownership operations.
+    /// Leaves replacement unchanged; callable children retain reference-semantic code.
     /// Throws std::out_of_range for invalid index, std::invalid_argument for shape mismatch
     /// or non-composites. Failure leaves the value unchanged; no rollback copy is needed.
     /// Complexity: O(old and new child payload size) time and O(new child size) new space.
@@ -168,12 +188,13 @@ public:
     void set(std::size_t index, const value& replacement);
     /// Copies a named record field; throws std::invalid_argument for non-record/missing name.
     /// Complexity: O(field count + name bytes + child payload size) time and child space.
-    /// Example: `value::record(TYPE, FIELDS).field("enabled").as<bool>()`.
+    /// See the class example for a complete record and field lookup.
     value field(std::string_view name) const;
-    /// Replaces a named record field with an independent, exact-shape copy.
+    /// Replaces a named record field with a copy of the exact expected shape.
     /// Throws std::invalid_argument for non-record/missing name or shape mismatch.
+    /// Follows set's ownership compatibility, copy semantics, and unchanged-on-failure guarantee.
     /// Complexity: O(field count + name bytes + old/new child size) time and new child space.
-    /// Example: `record.set_field("enabled", value::from(true));`.
+    /// See the class example for a complete record and field replacement.
     void set_field(std::string_view name, const value& replacement);
 };
 

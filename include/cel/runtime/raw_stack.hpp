@@ -19,11 +19,18 @@ struct frame_access;
 } // namespace detail
 
 /// Borrows a complete descriptor and its initialized canonical representation.
-/// Descriptor and bytes outlive every use; bytes match the complete type and ownership pair.
-/// The bytes do not alias storage mutated by the receiving evaluation.
-/// This view neither owns nor destroys its source and never relocates a public facade.
-/// Example: `double n = 2.0; auto type = value_type::leaf<double>();
-/// borrowed_value input{type, reinterpret_cast<const std::byte*>(&n)};`.
+/// Precondition: descriptor and bytes outlive every use; bytes match the complete type and
+/// ownership pair and do not alias storage mutated by the receiving evaluation.
+/// Copies retain the same borrows, not ownership. Destruction does not destroy the source.
+/// Native leaves supply canonical bytes directly; native containers and callable objects do not.
+///
+/// Borrow a live leaf and extract a copy:
+/// @code
+/// double n = 2.0;
+/// auto type = cel::value_type::leaf<double>();
+/// cel::borrowed_value input{type, reinterpret_cast<const std::byte*>(&n)};
+/// auto copy = input.as<double>(); // 2.0; n remains owned by the caller.
+/// @endcode
 struct borrowed_value {
     const value_type& type; ///< Borrows live immutable canonical metadata.
     const std::byte* data;  ///< Borrows canonical bytes; null is valid for any zero-byte layout.
@@ -33,8 +40,9 @@ private:
     void require_type(const value_type& expected) const;
 
 public:
-    /// Returns an independent concrete result without creating intermediate value facades.
-    /// Throws invalid_argument on a wrong complete type or absent/misaligned bytes.
+    /// Returns a concrete leaf, vector, or tuple copy from compatible canonical bytes.
+    /// Retains no borrow in an owning vector/tuple result; leaf pointers do not acquire ownership.
+    /// Throws std::invalid_argument on a wrong complete type or absent/misaligned nonempty bytes.
     /// Complexity: O(payload + compared shape size) time and result space.
     /// Example: `auto n = input.as<double>();`.
     template <class T>
@@ -46,13 +54,14 @@ public:
 };
 
 /// Owns reusable canonical operand bytes and complete live-slot metadata.
-/// Only internal canonical carriers transfer bytewise; public facades never do.
-/// Moving requires no active frames; the owner outlives every borrowed frame.
+/// The owner outlives every borrowed frame. Moving rejects active frames.
 /// Exclusive access is required, including during nested evaluation.
-/// Canonical construction, operand acquisition, and retirement hold a nonallocating phase gate.
-/// Reentrant mutation, extraction, execution, and frame entry throw logic_error during a phase.
-/// Ordinary operation callbacks run outside the gate and may push or evaluate nested frames.
+/// During canonical construction, operand acquisition, or retirement, reentrant mutation,
+/// extraction, execution, and frame entry throw std::logic_error.
+/// Ordinary operation callbacks may use the active frame or evaluate a nested frame.
 /// Example: `raw_stack s; s.reserve(256, 256); s.push(2.0); auto n = s.pop<double>();`.
+// [knowledge] Transfer only internal canonical carriers bytewise, never public facades.
+// [knowledge] Keep the ownership-phase gate nonallocating and release it before ordinary callbacks.
 class raw_stack {
     std::unique_ptr<detail::stack_state> _state;
     friend class frame;
@@ -136,7 +145,8 @@ class raw_stack {
 public:
     /// Creates an empty reusable stack.
     raw_stack();
-    /// Retires all live payloads; no frame may outlive the stack.
+    /// Retires all live payloads and releases reserved storage.
+    /// Precondition: no frame referring to this stack remains alive.
     /// Complexity: O(slots + visited payload ownership paths).
     ~raw_stack();
     /// Disallows duplicated mutable ownership.
@@ -199,6 +209,7 @@ public:
         return result;
     }
     /// Clones a public owner into canonical stack storage.
+    /// Leaves source unchanged, preserving value's reference semantics for callable components.
     /// Throws logic_error if a frame is active; failure preserves all operands.
     /// Complexity: O(cloned payload + retained bytes/slots on growth) time and space.
     /// Example: `stack.push_clone(value::from(std::vector{2.0}));`.
@@ -208,7 +219,7 @@ public:
     /// Complexity: O(outer bytes + retained bytes/slots on growth).
     /// Example: `auto v = value::from(true); stack.push_take(v);`.
     void push_take(value& source);
-    /// Transfers the top canonical owner into a public facade.
+    /// Removes the top operand and transfers its canonical ownership to the returned value.
     /// Throws out_of_range on underflow and logic_error if a frame is active.
     /// Failure preserves the stack.
     /// Complexity: O(outer bytes) time and space.
@@ -220,6 +231,8 @@ public:
 /// Destruction retires its suffix and preserves its checkpoint's live prefix.
 /// Frames are nonmovable and nested in lexical LIFO order; stack and arguments outlive them.
 /// Only the innermost frame mutates the stack; context grants no mutable ownership.
+/// Keep input owners and descriptors alive and unchanged during reads; keep a context object
+/// alive for every use of its pointer. A frame retains spans, not copies of arguments.
 /// Construction throws logic_error while the stack's canonical phase gate is held.
 /// Mutating calls and execution also reject phase reentry; argument views remain borrowed.
 /// Example: `raw_stack s; frame f(s); f.push(2.0); auto n = f.pop<double>();`.
@@ -276,7 +289,8 @@ class frame {
     }
 
 public:
-    /// Checkpoints stack depth and explicitly borrows arguments and context.
+    /// Checkpoints stack depth and borrows public arguments and an optional context pointer.
+    /// Defaults to no arguments and null context; entering a nested frame protects the live prefix.
     /// Throws logic_error if a canonical ownership phase is active.
     /// Example: `frame scope(stack, arguments, &client_context);`.
     explicit frame(raw_stack& stack,
@@ -293,6 +307,7 @@ public:
           std::span<const borrowed_value> arguments,
           const void* context = nullptr);
     /// Retires the acquired suffix and restores the enclosing frame.
+    /// Precondition: every nested frame has already been destroyed.
     /// Complexity: O(suffix slots + visited payload ownership paths), without allocating.
     ~frame();
     /// Disallows duplicated scope ownership.
@@ -303,21 +318,26 @@ public:
     frame(frame&&) = delete;
     /// Disallows move assignment of active scopes.
     frame& operator=(frame&&) = delete;
-    /// Returns this scope's live operand depth above its checkpoint.
+    /// Returns the live stack depth above this scope's checkpoint, including any nested suffix.
     /// Example: `frame f(stack); f.depth() == 0`.
     std::size_t depth() const noexcept;
-    /// Borrows the caller-owned stack for nested evaluation.
+    /// Returns the caller-owned stack for nested evaluation, not independent mutable ownership.
+    /// Mutate through the innermost frame while any frame is active.
     /// Example: `frame nested(scope.stack(), scope.arguments(), scope.context());`.
     raw_stack& stack() const noexcept { return *_stack; }
     /// Borrows public input owners; empty when constructed with canonical pointer slots.
+    /// The returned span borrows the constructor's input; this frame does not extend its lifetime.
     /// Example: `auto inputs = scope.arguments();`.
     std::span<const value> arguments() const noexcept { return _arguments; }
     /// Borrows pre-bound canonical inputs; empty when constructed with public value inputs.
+    /// The returned span borrows the constructor's input; this frame does not extend its lifetime.
     /// Example: `frame nested(scope.stack(), scope.canonical_arguments(), scope.context());`.
     std::span<const borrowed_value> canonical_arguments() const noexcept {
         return _canonical_arguments;
     }
-    /// Borrows one argument; throws out_of_range on malformed external index.
+    /// Borrows one source-order argument without consuming or copying it.
+    /// The descriptor and bytes remain caller-owned; keep their source alive and unchanged.
+    /// Throws std::out_of_range if index is outside the supplied argument span.
     /// Example: `auto n = scope.argument(0).as<double>();`.
     borrowed_value argument(std::size_t index) const;
     /// Returns the explicitly borrowed context pointer, or null.
@@ -351,6 +371,7 @@ public:
         return result;
     }
     /// Clones a public owner into this frame's suffix.
+    /// Leaves source unchanged, preserving value's reference semantics for callable components.
     /// Throws logic_error if a nested scope is active; failure preserves live operands.
     /// Complexity: O(cloned payload + retained bytes/slots on growth) time and space.
     /// Example: `scope.push_clone(value::from(true));`.
@@ -360,7 +381,7 @@ public:
     /// Complexity: O(outer bytes + retained bytes/slots on growth).
     /// Example: `scope.push_take(owner);`.
     void push_take(value& source);
-    /// Transfers the top suffix operand to a public owner.
+    /// Removes the top suffix operand and transfers its ownership to the returned value.
     /// Throws out_of_range on underflow and logic_error if a nested scope is active.
     /// Failure preserves the operand.
     /// Complexity: O(outer bytes) time and space.
