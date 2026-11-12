@@ -21,3 +21,9 @@
  * Handles share code; they do not independently copy mutable callback captures.
  * See \ref runtime_callable_binding for complete signature and ownership rules.
  */
+
+/** \example getting_started.cpp
+ * Evaluates a prepared program twice on a reserved, reusable stack while
+ * preserving caller-owned prefix storage.
+ * See \ref runtime_get_started for the walkthrough.
+ */
