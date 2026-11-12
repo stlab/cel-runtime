@@ -5,7 +5,7 @@ include(cmake/CPM.cmake)
 set(CPP_LIBRARY_VERSION "" CACHE STRING "CEL runtime package version override")
 
 # Fetch cpp-library before project()
-CPMAddPackage("gh:stlab/cpp-library#dc4fcb11051903ad73fe9cc30fd964b4f83eee20")
+CPMAddPackage("gh:stlab/cpp-library@5.8.0")
 include(${cpp-library_SOURCE_DIR}/cpp-library.cmake)
 
 # Enable dependency tracking before project()
@@ -15,8 +15,9 @@ cpp_library_enable_dependency_tracking()
 project(runtime LANGUAGES CXX)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Enable CTest infrastructure (required for tests/examples to work)
-include(CTest)
+if(PROJECT_IS_TOP_LEVEL)
+    include(CTest)
+endif()
 
 # Setup library
 cpp_library_setup(
@@ -45,12 +46,16 @@ if(TARGET docs)
         COMMAND "${CMAKE_COMMAND}" -E copy
             "${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt" "${CMAKE_CURRENT_BINARY_DIR}/CMakeLists.txt")
 endif()
-if(BUILD_TESTING)
+if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING)
     configure_file(tests/installed_consumer.cmake.in installed_consumer.cmake @ONLY)
+    configure_file(tests/source_consumer.cmake.in source_consumer.cmake @ONLY)
     add_test(NAME installed_consumer
         COMMAND "${CMAKE_COMMAND}" "-DCONFIG=$<CONFIG>"
             -P "${CMAKE_CURRENT_BINARY_DIR}/installed_consumer.cmake")
-    set_tests_properties(installed_consumer PROPERTIES TIMEOUT 180)
+    add_test(NAME source_consumer
+        COMMAND "${CMAKE_COMMAND}" "-DCONFIG=$<CONFIG>"
+            -P "${CMAKE_CURRENT_BINARY_DIR}/source_consumer.cmake")
+    set_tests_properties(installed_consumer source_consumer PROPERTIES TIMEOUT 180)
     set_tests_properties(executable_retirement_test PROPERTIES TIMEOUT 180)
 endif()
 if(TARGET storage_test)

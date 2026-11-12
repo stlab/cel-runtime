@@ -1,5 +1,9 @@
 # CEL runtime
 
+> **Note:** This project is a temporary solution for using the CEL language from
+> [cel-rs](https://github.com/stlab/cel-rs) in C++. This library will be deprecated
+> when using the Rust implementations from C++ becomes viable.
+
 Build a checked program once, then evaluate it repeatedly on your own reusable
 stack. This C++20 library supplies program builders, owning results, complete
 value types, and callable values. To compile CEL text instead of constructing
@@ -14,12 +18,7 @@ your application target:
 ```cmake
 set(CPM_USE_LOCAL_PACKAGES OFF)
 include(cmake/CPM.cmake)
-CPMAddPackage(
-    NAME cel-runtime
-    GITHUB_REPOSITORY stlab/cel-runtime
-    GIT_TAG 8e3b08f8da2fb3a7add02ed3cc9d5bc54c606c49
-    OPTIONS "BUILD_SHARED_LIBS OFF" "BUILD_TESTING OFF" "CEL_INSTALL OFF"
-)
+CPMAddPackage("gh:stlab/cel-runtime@1.0.0")
 add_executable(client main.cpp)
 target_link_libraries(client PRIVATE cel::runtime)
 ```

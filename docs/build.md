@@ -1,5 +1,9 @@
 # Build and link the runtime with CPM {#runtime_build}
 
+> **Note:** This project is a temporary solution for using the CEL language from
+> [cel-rs](https://github.com/stlab/cel-rs) in C++. This library will be deprecated
+> when using the Rust implementations from C++ becomes viable.
+
 This tutorial builds `cel-runtime` from source as a static library inside
 your application's CMake build. No installation or package prefix is needed.
 
@@ -65,12 +69,7 @@ cmake_minimum_required(VERSION 3.24)
 project(runtime_client LANGUAGES CXX)
 set(CPM_USE_LOCAL_PACKAGES OFF)
 include(cmake/CPM.cmake)
-CPMAddPackage(
-    NAME cel-runtime
-    GITHUB_REPOSITORY stlab/cel-runtime
-    GIT_TAG 8e3b08f8da2fb3a7add02ed3cc9d5bc54c606c49
-    OPTIONS "BUILD_SHARED_LIBS OFF" "BUILD_TESTING OFF" "CEL_INSTALL OFF"
-)
+CPMAddPackage("gh:stlab/cel-runtime@1.0.0")
 add_executable(client main.cpp)
 target_link_libraries(client PRIVATE cel::runtime)
 enable_testing()
@@ -86,14 +85,13 @@ ctest --test-dir build --output-on-failure
 ```
 
 Confirm that `client` passes. CPM fetches the pinned runtime source and builds
-it as a static library. `BUILD_SHARED_LIBS OFF` selects static linkage,
-`BUILD_TESTING OFF` disables dependency tests, and `CEL_INSTALL OFF` disables
-the runtime's package installation rules. `CPM_USE_LOCAL_PACKAGES OFF` keeps
-CPM from preferring an installed package.
+it as a static library by default. Dependency builds omit the runtime's tests
+and package installation rules.
+`CPM_USE_LOCAL_PACKAGES OFF` keeps CPM from preferring an installed package.
 
 The `cel::runtime` target supplies the headers, static library, and C++20
 requirement. Do not add dependency include or library directories manually.
-Keep a reviewed commit in `GIT_TAG` when updating the dependency.
+Select a reviewed release after `@` when updating the dependency.
 
 Continue with [Compile and reuse a program](get-started.md) to pass arguments,
 reserve stack storage, and evaluate the same program more than once.
