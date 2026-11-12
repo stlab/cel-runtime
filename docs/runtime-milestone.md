@@ -75,8 +75,8 @@ Independent final port review and remote/platform validation remain pending.
 
 ## Reproduce local validation
 
-The pinned cpp-library release is `v5.8.0` at revision
-`dc4fcb11051903ad73fe9cc30fd964b4f83eee20`. Its presets, doctest/CTest,
+The pinned cpp-library release is `v5.8.1` at revision
+`bdf936f21b194b6086116470826ad8cba7c288e4`. Its presets, doctest/CTest,
 compile-fail gates, Doxygen, exports, installation, and generated CI remain in
 use. The installed-consumer CTest installs the built configuration to an
 isolated prefix, rejects leaked source/sibling paths, and compiles two real

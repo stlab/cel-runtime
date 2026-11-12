@@ -5,7 +5,7 @@ include(cmake/CPM.cmake)
 set(CPP_LIBRARY_VERSION "" CACHE STRING "CEL runtime package version override")
 
 # Fetch cpp-library before project()
-CPMAddPackage("gh:stlab/cpp-library@5.8.0")
+CPMAddPackage("gh:stlab/cpp-library@5.8.1")
 include(${cpp-library_SOURCE_DIR}/cpp-library.cmake)
 
 # Enable dependency tracking before project()
