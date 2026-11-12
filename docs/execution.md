@@ -212,7 +212,6 @@ calls allocate an argument-view table and result storage/facade. Structural
 outer staging, array owners and element extents, composite reads/results, native
 adapters, and client callbacks can allocate.
 
-The tests verify functional ownership, cleanup, and prefix preservation. They do
-not replace global allocation functions, measure allocation counts, or inject
-allocation failures. See [the contract ledger](parity.md) for the tested
-boundaries.
+Reservation does not promise allocation-free callbacks or composite results.
+Choose prepared scalar calls when you need to avoid repeated type matching
+and public scalar owner construction.

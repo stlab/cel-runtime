@@ -12,6 +12,8 @@
 #include <typeindex>
 
 namespace cel {
+/// \addtogroup runtime_values
+/// @{
 
 /// Identifies every source range form independently of its endpoint layout.
 /// Example: `range_kind::range_inclusive` describes `start..=end`.
@@ -206,5 +208,6 @@ struct record_field {
 /// @endcode
 value_type bind_runtime_ownership(const value_type& type);
 
+/// @}
 } // namespace cel
 #endif

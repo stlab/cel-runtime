@@ -11,6 +11,9 @@
 #include <utility>
 
 namespace cel {
+/// \addtogroup runtime_stack
+/// @{
+
 namespace detail {
 class frame;
 class raw_segment;
@@ -192,5 +195,6 @@ public:
     value pop_value();
 };
 
+/// @}
 } // namespace cel
 #endif

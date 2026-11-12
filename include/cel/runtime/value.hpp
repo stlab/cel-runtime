@@ -16,6 +16,9 @@
 #include <vector>
 
 namespace cel {
+/// \addtogroup runtime_values
+/// @{
+
 /// Provides trusted concrete boundary adapters; these are not client-leaf registrations.
 namespace detail {
 struct owned_payload;
@@ -360,5 +363,7 @@ template <class T>
 value_type native_type() {
     return detail::concrete_adapter<std::remove_cvref_t<T>>::type();
 }
+
+/// @}
 } // namespace cel
 #endif

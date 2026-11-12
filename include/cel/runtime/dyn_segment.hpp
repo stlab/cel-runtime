@@ -8,6 +8,9 @@
 #include <vector>
 
 namespace cel {
+/// \addtogroup runtime_programs
+/// @{
+
 /// Identifies the byte cursor and live-slot depth below a fragment's local operands.
 /// Both coordinates must match; zero-byte prefixes still contribute live slots.
 /// Defaults to zero bytes and zero slots, the origin admitted for independent execution.
@@ -757,5 +760,7 @@ prepared_segment<R, Args...> compiled_segment::prepare() const {
     const std::array<value_type, sizeof...(Args)> types{detail::concrete_adapter<Args>::type()...};
     return prepared_segment<R, Args...>(prepare_raw(types, detail::concrete_adapter<R>::type()));
 }
+
+/// @}
 } // namespace cel
 #endif

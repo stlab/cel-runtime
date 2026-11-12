@@ -1,0 +1,23 @@
+/** \defgroup runtime_programs Programs and operations
+ * Build checked operations with cel::dyn_segment, freeze them as
+ * cel::compiled_segment, and bind typed repeated calls with cel::prepared_segment.
+ * See \ref runtime_get_started and \ref runtime_libraries for examples.
+ */
+
+/** \defgroup runtime_stack Reusable stacks
+ * Keep caller-owned storage across evaluations. Reserve before entering a frame
+ * and retain exclusive access to a stack throughout evaluation.
+ * See \ref runtime_execution for storage and failure guarantees.
+ */
+
+/** \defgroup runtime_values Values and types
+ * Describe complete semantic types and own scalar or aggregate results.
+ * Concrete vectors and tuples use trusted boundary adapters; opaque client
+ * leaves must be trivially copyable.
+ */
+
+/** \defgroup runtime_callables Callable results
+ * Receive and invoke callable values whose frozen bodies outlive their builders.
+ * Handles share code; they do not independently copy mutable callback captures.
+ * See \ref runtime_callable_binding for complete signature and ownership rules.
+ */

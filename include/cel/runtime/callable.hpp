@@ -4,6 +4,9 @@
 #include <cel/runtime/dyn_segment.hpp>
 
 namespace cel {
+/// \addtogroup runtime_callables
+/// @{
+
 namespace detail {
 struct callable_state;
 struct callable_access;
@@ -98,5 +101,7 @@ public:
     /// Example: `auto fn = callable::from_value(factory.call(stack, {}));`.
     static callable from_value(const value& source);
 };
+
+/// @}
 } // namespace cel
 #endif

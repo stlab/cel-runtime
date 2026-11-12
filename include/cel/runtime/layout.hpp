@@ -6,6 +6,8 @@
 
 /// Provides byte extents for stack reservation and type descriptors.
 namespace cel {
+/// \addtogroup runtime_values
+/// @{
 
 /// Describes a byte extent and its requested alignment, both in bytes.
 /// A checked storage operation accepts a zero size but requires a nonzero power-of-two
@@ -18,5 +20,6 @@ struct layout {
     std::size_t alignment;
 };
 
+/// @}
 } // namespace cel
 #endif

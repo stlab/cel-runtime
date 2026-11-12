@@ -5,35 +5,33 @@ storage. You construct operations directly; this runtime does not parse text.
 
 ## Before you begin
 
-Install the library by following [Install and start](../README.md).
-Run the following commands from the runtime checkout. The consumer uses the
-checkout only for its application sources, never for runtime headers or
-library linkage.
+Create the CPM application from
+[Build and link the runtime with CPM](build.md). Keep its dependency
+declaration and `target_link_libraries` call.
 
-## Build the installed example
+## Build the reuse example
 
-1. Configure the standalone consumer against the installation:
+1. Replace the application's `add_executable` line with the example source
+   fetched by CPM:
 
-   ```sh
-   cmake -S tests/installed_consumer -B build/example-consumer \
-     -DCMAKE_PREFIX_PATH="$PWD/build/install-root"
+   ```cmake
+   add_executable(client "${cel-runtime_SOURCE_DIR}/examples/getting_started.cpp")
    ```
 
 2. Build the consumer:
 
    ```sh
-   cmake --build build/example-consumer
+   cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+   cmake --build build
    ```
 
 3. Run its tests:
 
    ```sh
-   ctest --test-dir build/example-consumer --output-on-failure
+   ctest --test-dir build --output-on-failure --verbose
    ```
 
-   Confirm that both `installed_getting_started` and
-   `installed_runtime_consumer` pass. The second client also checks nested
-   owning copies and a callable received after its builders disappear.
+   Confirm that `client` passes and prints `5` followed by `7`.
 
 ## Reuse the stack
 
@@ -41,7 +39,12 @@ The example compiles subtraction with one positional `double` argument. It
 binds the complete signature once, reserves storage around an existing bool
 prefix, and makes two calls. Both calls leave the prefix live.
 
-The compiled source is `examples/getting_started.cpp`:
+Start the builder with a positional argument, then add a constant and an
+operation. The operation reads the older argument before the newer constant,
+so its result is `input - 3.0`. Freezing prevents further emission, and
+preparation binds the result and argument as `double`.
+
+The complete compiled source is `examples/getting_started.cpp`:
 
 \include getting_started.cpp
 
@@ -61,14 +64,8 @@ The reservation includes the stack's measured byte cursor and logical depth.
 Do not mutate the prefix between measuring it and reserving. The bool remains
 owned by the caller until `pop<bool>()` retires it.
 
-For a separate application, use the same package and target declarations:
-
-```cmake
-find_package(cel-runtime CONFIG REQUIRED)
-add_executable(client main.cpp)
-target_link_libraries(client PRIVATE cel::runtime)
-```
-
-The target supplies installed headers, the library, and its C++20 requirement.
+To adapt the example, copy its source into your application's `main.cpp` and
+restore `add_executable(client main.cpp)`. The `cel::runtime` target continues
+to supply headers, the static library, and its C++20 requirement.
 For raw result storage, composite boundaries, or nested calls, see
 [Choose execution and ownership boundaries](execution.md).
