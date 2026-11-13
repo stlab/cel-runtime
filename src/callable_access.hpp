@@ -3,41 +3,59 @@
 #define CEL_RUNTIME_CALLABLE_ACCESS_HPP
 #include <cel/runtime/callable.hpp>
 namespace cel::detail {
-/// Owns a stable code handle and excludes same-carrier entry for the entire invocation.
-/// Declares before staging/result guards so their cleanup precedes entry retirement.
+/// A retained code handle that excludes same-carrier entry for its lifetime.
+///
+/// Must outlive invocation-owned argument staging and result publication/cleanup.
 class callable_invocation {
-    callable _code; ///< Retains the guarded immutable code independently of stack carriers.
+    callable _code; // Retains guarded code independently of stack carriers.
 
 public:
     /// Retains reference-semantic code and enters its guard without allocating on success.
-    /// Throws logic_error for a moved-from handle or already-active carrier.
+    ///
+    /// Throws std::logic_error for a moved-from handle or already-active carrier.
     explicit callable_invocation(callable code);
-    /// Restores idle state after invocation-owned staging/results retire, then releases code.
-    /// Gate restoration never allocates or throws.
+    /// Releases the entry guard and retained code.
+    ///
+    /// Guard release does not allocate.
+    ///
     /// Complexity: O(last-owned captures and binding metadata).
     ~callable_invocation() noexcept;
-    /// Disallows duplicated entry ownership.
     callable_invocation(const callable_invocation&) = delete;
-    /// Disallows duplicated entry assignment.
     callable_invocation& operator=(const callable_invocation&) = delete;
-    /// Dispatches trusted stable canonical arguments through an already-entered body.
-    /// Precondition: complete arity/ownership were bound; inputs/output are disjoint from
-    /// mutable stack bytes and remain live/aligned through the call.
-    /// Failure leaves output uninitialized; original body exceptions propagate.
-    /// Complexity: O(arguments + executed instructions and payload work).
+    /// Executes trusted canonical arguments through the guarded body.
+    ///
+    /// \pre emitted reads match their bound complete types and ownership operations.
+    /// Their initialized bytes remain live, aligned, and disjoint from mutable stack/output
+    /// storage; no callback accesses mutable aliases of the inputs.
+    /// \pre destination is uninitialized, aligned, disjoint storage for the complete result;
+    /// null is permitted for a zero-byte result.
+    ///
+    /// Throws std::invalid_argument for wrong arity or std::logic_error for canonical-phase
+    /// stack access. Failure leaves output uninitialized and preserves the caller prefix.
+    /// Body exceptions propagate unchanged; external callback effects are not rolled back.
+    ///
+    /// Complexity: argument views, executed instructions, payload/callback work, and suffix
+    /// cleanup.
     void call_into(raw_stack& stack,
                    std::span<const borrowed_value> arguments,
                    std::byte* destination) const;
 };
-/// Dispatches installed carriers with construction-bound complete ownership witnesses.
+/// Access to the runtime's installed callable carriers.
 struct callable_access {
     /// Borrows an installed carrier handle from initialized canonical bytes.
-    /// Precondition: bytes contain this implementation's live complete carrier.
+    ///
+    /// \pre bytes contain this implementation's live complete carrier, whose owner remains
+    /// unchanged and alive while the returned handle is borrowed.
     static const callable& read(const std::byte* bytes) noexcept;
-    /// Reports whether the descriptor has this implementation's complete ownership pair.
+    /// Returns whether type has the runtime's installed callable carrier operations.
+    ///
+    /// Does not establish the presence of initialized carrier bytes.
     static bool installed(const value_type& type) noexcept;
-    /// Deletes a canonical carrier after releasing its state into the current worklist.
-    /// Precondition: bytes contain this implementation's exclusively owned live carrier.
+    /// Retires the installed carrier's owned handle without freeing its outer bytes.
+    ///
+    /// Leaves the carrier bytes uninitialized.
+    ///
+    /// \pre bytes contain this implementation's exclusively owned live complete carrier.
     static void retire(std::byte* bytes, retirement_queue& queue) noexcept;
 };
 } // namespace cel::detail

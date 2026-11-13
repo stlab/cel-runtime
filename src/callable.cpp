@@ -7,23 +7,28 @@
 #include <stdexcept>
 
 namespace cel::detail {
-/// Owns one immutable body/signature plus its exclusive recursive-entry state.
+/// A shared callable binding with an exclusive invocation guard.
 struct callable_state : retirement_node {
     prepared_raw_segment body; ///< Retains frozen code and full bound parameters.
     value_type signature;      ///< Retains the installed ownership representation.
     bool active = false;       ///< Rejects recursive entry into this shared carrier.
     /// Transfers the complete prevalidated binding.
+    ///
+    /// Complexity: transfer of the bound argument descriptors and signature.
     callable_state(prepared_raw_segment input, value_type type) :
         retirement_node(dispose_state), body(std::move(input)), signature(std::move(type)) {}
-    /// Retires the prepared executable edge before deleting its guard and descriptors.
-    /// Complexity: O(released binding/signature metadata); child code retires through the queue.
+    /// Retires this binding and its signature, deferring owned executable retirement.
+    ///
+    /// \pre base is the live callable_state selected by its retirement callback.
+    ///
+    /// Complexity: argument descriptor traversal and released signature/binding metadata.
     static void dispose_state(retirement_node& base, retirement_queue& queue) noexcept {
         auto& state = static_cast<callable_state&>(base);
         segment_access::retire(state.body, queue);
         delete &state;
     }
 };
-/// Carries one owned facade pointer, never a byte-relocated public callable.
+/// A canonical owner of a reference-semantic callable handle.
 struct callable_carrier {
     callable* owner; ///< Owns the reference-semantic facade.
 };
@@ -35,17 +40,30 @@ const callable& callable_access::read(const std::byte* bytes) noexcept {
     std::memcpy(&carrier, bytes, sizeof(carrier));
     return *carrier.owner;
 }
-/// Writes one uniquely owned facade pointer into canonical carrier bytes.
+/// Initializes a canonical carrier with the supplied owned callable handle.
+///
+/// \pre destination has uninitialized carrier storage and pointer is a live uniquely owned
+/// callable facade; the caller transfers its ownership to the carrier.
 void write_callable(std::byte* destination, callable* pointer) noexcept {
     const callable_carrier carrier{pointer};
     std::memcpy(destination, &carrier, sizeof(carrier));
 }
-/// Clones the carrier owner while explicitly sharing reference-semantic frozen code.
+/// Copies an installed carrier, sharing its reference-semantic code and entry guard.
+///
+/// \pre source contains a live installed carrier and destination has disjoint uninitialized
+/// carrier storage.
+///
+/// Failure leaves destination uninitialized and source unchanged.
+/// Complexity: allocation of one constant-size callable facade.
 void clone_callable(const std::byte* source, std::byte* destination) {
     auto owner = std::make_unique<callable>(callable_access::read(source));
     write_callable(destination, owner.release());
 }
-/// Retires the facade pointer carrier, releasing frozen code on its last reference.
+/// Retires the installed carrier without freeing its outer bytes.
+///
+/// \pre source contains an exclusively owned live installed carrier.
+///
+/// Complexity: last-owned code, capture, and binding metadata retirement.
 void destroy_callable(std::byte* source) noexcept { delete &callable_access::read(source); }
 bool callable_access::installed(const value_type& type) noexcept {
     if (type.kind() != type_kind::callable) return false;

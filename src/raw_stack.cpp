@@ -18,7 +18,11 @@ using detail::borrowed_value;
 using detail::frame;
 
 namespace {
-/// Rejects missing or misaligned borrowed bytes without traversing metadata.
+/// Checks that nonempty canonical input has aligned source bytes.
+///
+/// Any zero-byte layout accepts null; does not compare complete types or ownership pairs.
+///
+/// Throws std::invalid_argument for missing or misaligned nonempty bytes.
 void require_bytes(const borrowed_value& input) {
     const auto layout = input.type.byte_layout();
     if (layout.size != 0 &&

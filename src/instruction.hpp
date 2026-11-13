@@ -10,21 +10,28 @@ class compiled_segment;
 } // namespace cel
 namespace cel::detail {
 class prepared_raw_segment;
-/// Borrows one arena-owned constructed capture with typed dispatch and destruction.
+/// A borrowed capture with its typed execution, destruction, and retirement operations.
+///
+/// The capture owner must retain the live object until destruction.
 struct instruction {
     const void* capture;                   ///< Borrows its stable capture object.
     void (*execute)(const void*, frame&);  ///< Dispatches through the typed thunk.
     void (*destroy)(const void*) noexcept; ///< Destroys the actual capture type.
     void (*retire)(const void*, retirement_queue&) noexcept; ///< Detaches runtime ownership edges.
 };
-/// Owns a standard stable arena and the destruction log for constructed captures.
+/// Stable capture storage with exactly-once destruction of constructed operations.
 struct instruction_storage : retirement_node {
     std::pmr::monotonic_buffer_resource arena; ///< Owns stable aligned object storage.
     std::vector<instruction> instructions;     ///< Owns dispatch/destruction records.
-    /// Creates a stable arena whose last release detaches managed captures before deletion.
+    /// Creates empty capture storage with last-owner retirement.
     instruction_storage() : retirement_node(dispose_storage) {}
-    /// Retires managed edges, destroys real captures, and deletes their arena.
-    /// Complexity: O(instructions + capture destruction work); no traversal allocation.
+    /// Destroys stored captures and releases their storage, deferring managed descendant
+    /// retirement.
+    ///
+    /// \pre base is the live instruction_storage selected by its retirement callback.
+    ///
+    /// Complexity: O(instruction count + capture retirement/destruction work) time without
+    /// traversal allocation.
     static void dispose_storage(retirement_node& base, retirement_queue& queue) noexcept {
         auto& storage = static_cast<instruction_storage&>(base);
         for (auto it = storage.instructions.rbegin(); it != storage.instructions.rend(); ++it) {
@@ -35,6 +42,7 @@ struct instruction_storage : retirement_node {
         delete &storage;
     }
     /// Destroys captures before releasing their arena, in reverse construction order.
+    ///
     /// Complexity: O(instructions + capture destruction work).
     ~instruction_storage() {
         // Captures have real object lifetimes; arena release alone cannot destroy them.
@@ -42,25 +50,35 @@ struct instruction_storage : retirement_node {
             it->destroy(it->capture);
     }
 };
-/// Bridges a later checked builder to arbitrary canonical instruction dispatch.
+/// Checked preparation and trusted canonical capture publication.
 struct segment_access {
     /// Binds canonical execution for internal callers; follows the checked preparation contract.
+    ///
+    /// Complexity: compiled_segment's checked signature binding costs.
     static prepared_raw_segment prepare_raw(const compiled_segment& program,
                                             std::span<const value_type> arguments,
                                             const value_type& result);
-    /// Detaches a mutable operation sequence into the current last-owner worklist.
+    /// Releases a mutable sequence into the supplied retirement operation.
     static void retire(raw_segment& segment, retirement_queue& queue) noexcept {
         segment._storage.retire(queue);
     }
-    /// Detaches a frozen executable handle without destroying descendant captures recursively.
+    /// Releases frozen code into the supplied retirement operation without recursive destruction.
     static void retire(cel::compiled_segment& segment, retirement_queue& queue) noexcept;
-    /// Detaches a prepared executable handle while retaining its ordinary metadata cleanup.
+    /// Releases a prepared binding's code, leaving its signature metadata owned by the binding.
     static void retire(cel::detail::prepared_raw_segment& segment,
                        retirement_queue& queue) noexcept;
     /// Stores a typed capture without requiring public value operands or fixed arity.
-    /// F executes as const F&(frame&); it enforces its trusted complete stack signature.
-    /// Its partial-result writers use frame_access and clean failures before publishing.
-    /// Complexity: O(capture construction) time and stored space.
+    ///
+    /// F executes as const F&(frame&). Takes independent capture ownership; any referenced
+    /// external objects retain their original ownership and lifetime obligations.
+    ///
+    /// \pre the callback enforces its complete ordered stack signature and cleans up partial
+    /// result construction before propagating failure.
+    ///
+    /// Failure does not publish an operation or leave an unowned live capture.
+    ///
+    /// Complexity: callback construction and raw_segment append's amortized bookkeeping costs;
+    /// owned capture storage.
     template <class F>
     static void append(raw_segment& segment, F callback) {
         static_assert(std::is_nothrow_destructible_v<F>);

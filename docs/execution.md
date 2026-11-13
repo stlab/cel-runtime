@@ -167,10 +167,10 @@ No owner operation executes.
 The returned descriptor is a *capability witness*, not an initialized callable,
 executable body, or permission to treat arbitrary bytes as live values.
 The original declaration remains unbound, and checked emission still rejects
-it. Repeated binding is representation-compatible. Binding uses iterative
-memoized postorder and nonrecursive cleanup, with expected O(V + E + S) time
-and auxiliary space for distinct metadata nodes V, edges E, and copied name
-bytes S. Allocation failures propagate and leave the original graph unchanged.
+it. Repeated binding is representation-compatible. Binding takes expected O(V + E + S) time, O(V) auxiliary space, and at most
+O(V + E + S) newly allocated result metadata for distinct metadata nodes V,
+edges E, and copied name bytes S. Traversal and cleanup do not recurse.
+Allocation failures propagate and leave the original graph unchanged.
 
 Callable copies are *reference-semantic handles*: aliases share frozen code,
 callback references, and entry state, not independently copied mutable

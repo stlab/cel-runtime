@@ -19,7 +19,8 @@ namespace cel::detail {
 
 struct array_owner;
 
-/// Carries one packed array owner in trivially copyable canonical bytes.
+/// A byte-transferable canonical packed array owner.
+///
 /// Bytewise relocation transfers ownership and retires its source, never clones it.
 struct array_carrier {
     array_owner* owner; ///< Owns one aligned allocation of canonical elements.
@@ -28,7 +29,10 @@ static_assert(std::is_trivially_copyable_v<array_carrier>);
 static_assert(sizeof(array_carrier) == sizeof(void*));
 static_assert(alignof(array_carrier) == alignof(void*));
 
-/// Reads an initialized carrier without casting raw bytes to public wrappers.
+/// Borrows an initialized canonical array's owner.
+///
+/// \pre data provides a readable initialized array-carrier extent with a live owner.
+/// The returned carrier does not acquire ownership; its owner must remain alive while used.
 array_carrier read_array(const std::byte* data) noexcept {
     array_carrier result{};
     std::memcpy(&result, data, sizeof(result));
@@ -36,35 +40,44 @@ array_carrier read_array(const std::byte* data) noexcept {
 }
 
 /// Writes one ownership carrier into canonical bytes.
+///
+/// \pre data is aligned uninitialized array-carrier storage; owner is a valid uniquely
+/// owned array node. The caller retires its prior ownership of owner without destroying it.
 void write_carrier(std::byte* data, array_owner* owner) noexcept {
     const array_carrier carrier{owner};
     std::memcpy(data, &carrier, sizeof(carrier));
 }
 
 /// Returns an offset byte pointer, preserving null for zero-sized source unit.
-/// Precondition: offset lies within the canonical extent, or is zero for null data.
+///
+/// \pre offset lies within the canonical extent, or is zero for null data.
+/// The returned pointer borrows the same allocation and has its lifetime.
 template <class Byte>
 Byte* byte_at(Byte* data, std::size_t offset) noexcept {
     assert(data || offset == 0);
     return data ? data + offset : nullptr;
 }
 
-/// Owns a single packed allocation and its safely discardable initialized prefix.
-/// Elements have canonical stride; no element has a public wrapper or heap box.
-/// Partial resources belong to the next element, not to any uninitialized suffix.
-/// Worklist links and clone-source context are used only by an active ownership operation.
+/// Exclusive ownership of a partially initialized packed canonical array.
+///
+/// Destruction retires complete elements and any acquired resources in the next element.
 struct array_owner {
-    value_type element;          ///< Retains immutable element shape and destruction metadata.
-    storage bytes;               ///< Owns one suitably aligned canonical element allocation.
-    std::size_t count;           ///< Counts logical elements.
-    std::size_t initialized = 0; ///< Counts fully initialized elements.
-    std::size_t partial_resources = 0;         ///< Counts initialized carriers in the next element.
-    array_owner* pending_next = nullptr;       ///< Links nodes during cloning or final destruction.
-    const array_owner* clone_source = nullptr; ///< Borrows the source only during cloning.
+    // [knowledge] Elements have canonical stride with no public wrapper or heap box.
+    // initialized <= count; partial_resources belongs only to the next element.
+    // pending_next and clone_source are temporary state for an active ownership operation.
+    value_type element;                // Retains immutable element shape and destruction metadata.
+    storage bytes;                     // Owns one suitably aligned canonical element allocation.
+    std::size_t count;                 // Counts logical elements.
+    std::size_t initialized = 0;       // Counts fully initialized elements.
+    std::size_t partial_resources = 0; // Counts initialized carriers in the next element.
+    array_owner* pending_next = nullptr;       // Links nodes during cloning or final destruction.
+    const array_owner* clone_source = nullptr; // Borrows the source only during cloning.
 
     /// Allocates a checked canonical extent without constructing elements.
+    ///
     /// Throws std::overflow_error if count times stride overflows.
-    /// Complexity: O(canonical byte extent) initialization time and owned space.
+    /// Complexity: O(1 + count times canonical element extent) time and result storage;
+    /// zero-byte elements incur no per-element initialization.
     array_owner(value_type type, std::size_t length) : element(std::move(type)), count(length) {
         const auto layout = element.byte_layout();
         if (layout.size != 0 && count > std::numeric_limits<std::size_t>::max() / layout.size)
@@ -74,13 +87,19 @@ struct array_owner {
         bytes.resize(extent);
     }
     /// Destroys initialized ownership without allocating or consuming nesting-dependent stack.
-    /// Complexity: O(visited ownership paths and owned array nodes) time and O(1) auxiliary space.
+    ///
+    /// Client operations retain their own costs and behavior.
+    /// Complexity: O(N + L + C + D) time and O(1) runtime auxiliary space, with costs as in value.
     ~array_owner();
 };
 
-/// Retires a source-order carrier prefix, enqueuing array nodes rather than recursively deleting.
-/// Precondition: exactly the first count ownership carriers are initialized.
-/// Complexity: O(visited ownership paths) time and O(1) auxiliary space.
+/// Retires a source-order ownership-carrier prefix into enclosing retirement operations.
+///
+/// \pre Exactly the first count ownership carriers in data are valid and exclusively
+/// owned; count <= type_access::resources(type). pending and queue remain alive until
+/// their scheduled owners retire.
+/// Source carrier ownership is retired; array storage is released when pending is drained.
+/// Complexity: O(L + C) time and O(1) runtime auxiliary space, with costs as in value.
 void retire_resources(const value_type& type,
                       std::byte* data,
                       std::size_t count,
@@ -106,7 +125,12 @@ void retire_resources(const value_type& type,
 }
 
 /// Retires a packed array's initialized prefix without deleting the array node itself.
-/// Complexity: O(visited ownership paths) time and O(1) auxiliary space.
+///
+/// \pre owner has exclusive valid prefix/partial ownership; pending and queue remain alive
+/// until their scheduled owners retire.
+/// Leaves no initialized element ownership in owner.
+/// Complexity: O(L + C) time and O(1) runtime auxiliary space, with costs as in value;
+/// scalar elements require no per-element retirement.
 void retire_elements(array_owner& owner, array_owner*& pending, retirement_queue& queue) noexcept {
     const auto resources = type_access::resources(owner.element);
     const auto stride = owner.element.byte_layout().size;
@@ -124,9 +148,12 @@ void retire_elements(array_owner& owner, array_owner*& pending, retirement_queue
     owner.partial_resources = 0;
 }
 
-/// Deletes a worklist of retired array nodes without allocating traversal state.
-/// Nodes supply their own temporary links; descendants extend this same worklist.
-/// Complexity: O(visited ownership paths and array nodes) time and O(1) auxiliary space.
+/// Releases all scheduled array ownership and leaves pending empty.
+///
+/// \pre pending links uniquely owned valid array nodes with discardable initialized
+/// prefixes; queue remains alive until scheduled executable owners retire.
+/// No runtime traversal allocation or nesting-dependent call space is used.
+/// Complexity: O(N + L + C + D) time and O(1) runtime auxiliary space, with costs as in value.
 void drain_arrays(array_owner*& pending, retirement_queue& queue) noexcept {
     // Detach each node before retiring its descendants and releasing its aligned bytes.
     while (pending) {
@@ -145,9 +172,15 @@ array_owner::~array_owner() {
     drain_arrays(pending, queue);
 }
 
-/// Clones a fixed-extent carrier prefix and queues packed descendants for iterative cloning.
-/// completed records only independently owned carriers; failures leave a discardable prefix.
-/// Complexity: O(visited ownership paths + allocated canonical extents) time and owned space.
+/// Extends independently cloned carrier ownership through a fixed canonical extent.
+///
+/// \pre source is a readable valid owner of type, unchanged during cloning; destination
+/// is disjoint aligned writable storage with exactly completed valid cloned carriers.
+/// completed <= type_access::resources(type); pending retains uniquely owned partial clones.
+/// On success completed counts all direct carriers and pending retains descendants still
+/// needing cloning. Failure preserves a discardable prefix counted by completed.
+/// Complexity: O(B + N + L + C) time and new owned result storage, with costs as in value;
+/// O(1) runtime auxiliary space excluding opaque operations.
 void clone_resources(const value_type& type,
                      const std::byte* source,
                      std::byte* destination,
@@ -234,14 +267,19 @@ void destroy_payload(const value_type& type, std::byte* data, retirement_queue& 
 }
 
 /// Borrows a source-order fixed-aggregate child.
-/// Precondition: type is a tuple, record, or range and index is in bounds.
+///
+/// \pre type is a tuple, record, or range and index is in bounds.
+/// The result's lifetime follows type's metadata views.
 const value_type& child_type(const value_type& type, std::size_t index) {
     assert(index < type.offsets().size());
     return type.kind() == type_kind::range ? type.element() : type.fields()[index];
 }
 
 /// Destroys a successfully initialized field prefix without allocating cleanup state.
-/// Complexity: O(visited ownership paths and descendants) time and O(1) auxiliary space.
+///
+/// \pre type is a tuple, record, or range, count <= arity, and exactly that prefix is
+/// valid owned data, exclusively accessible for retirement.
+/// Complexity: O(F + N + L + C + D) time and O(1) runtime auxiliary space, with costs as in value.
 void destroy_prefix(const value_type& type, std::byte* data, std::size_t count) noexcept {
     while (count != 0) {
         --count;
@@ -249,21 +287,27 @@ void destroy_prefix(const value_type& type, std::byte* data, std::size_t count) 
     }
 }
 
-/// Owns canonical outer bytes and a safely discardable initialized field prefix.
+/// Exclusive ownership of a partially initialized canonical value.
 struct owned_payload {
-    value_type type;             ///< Retains complete immutable destruction metadata.
-    storage bytes;               ///< Owns canonical outer bytes, not public wrapper objects.
-    std::size_t initialized = 0; ///< Counts fields, or one scalar/array/callable representation.
+    // [knowledge] initialized counts complete aggregate fields, or one complete
+    // scalar/array/callable representation; bytes stores canonical carriers, never wrappers.
+    value_type type;             // Retains complete immutable destruction metadata.
+    storage bytes;               // Owns canonical outer bytes, not public wrapper objects.
+    std::size_t initialized = 0; // Counts fields, or one scalar/array/callable representation.
 
     /// Allocates checked canonical outer bytes without initializing ownership.
-    /// Complexity: O(canonical byte extent) time and storage.
+    ///
+    /// Complexity: O(canonical byte extent) time and result storage.
     explicit owned_payload(value_type shape) : type(std::move(shape)) {
         const auto extent = type.byte_layout();
         bytes.reserve(extent.size, extent.alignment);
         bytes.resize(extent.size);
     }
     /// Destroys initialized ownership and releases outer storage without recursion/allocation.
-    /// Complexity: O(visited ownership paths and descendants) time and O(1) auxiliary space.
+    ///
+    /// Client operations retain their own costs and behavior.
+    /// Complexity: O(F + N + L + C + D) time and O(1) runtime auxiliary space, with costs as in
+    /// value.
     ~owned_payload() {
         if (type.kind() == type_kind::tuple || type.kind() == type_kind::record ||
             type.kind() == type_kind::range)
@@ -273,7 +317,7 @@ struct owned_payload {
     }
 };
 
-/// Returns the initialized outer count for a complete canonical value.
+/// Returns the field count for fixed aggregates, or one for other canonical owners.
 std::size_t outer_count(const value_type& type) {
     return type.kind() == type_kind::tuple || type.kind() == type_kind::record ||
                    type.kind() == type_kind::range ?
@@ -363,7 +407,8 @@ void value_access::project(const value_type& type,
     }
 }
 
-/// Finds a named source-order field or reports malformed access.
+/// Returns the source-order index of a named record field.
+///
 /// Throws std::invalid_argument for a non-record or missing name.
 /// Complexity: O(field count + compared name bytes) time.
 std::size_t field_index(const value_type& type, std::string_view name) {

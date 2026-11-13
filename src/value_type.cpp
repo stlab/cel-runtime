@@ -25,28 +25,30 @@ void require_ownership(const value_type& type) {
         throw std::invalid_argument("complete ownership operations unavailable");
 }
 
-/// Owns immutable descriptor metadata after construction.
-/// Invariant: all fields and offsets are canonical and category-appropriate.
+/// Immutable complete semantic metadata after publication.
 struct type_plan {
-    type_kind kind = type_kind::tuple;        ///< Identifies the shape.
-    layout bytes{0, 1};                       ///< Describes its canonical representation.
-    bool owns = true;                         ///< Records complete ownership capabilities.
-    bool parameter = true;                    ///< Caches built-in/composite parameter admission.
-    std::size_t resources = 0;                ///< Counts direct ownership carriers.
-    std::type_index leaf{typeid(void)};       ///< Identifies a concrete leaf.
-    std::vector<value_type> fields;           ///< Owns ordered fields or callable parameters.
-    std::vector<std::size_t> offsets;         ///< Owns ordered aggregate offsets.
-    std::vector<std::size_t> resource_ends;   ///< Caches cumulative source-order carrier counts.
-    std::vector<std::string> names;           ///< Owns record field names.
-    std::string identity;                     ///< Owns nominal record identity.
-    std::optional<value_type> element;        ///< Retains array/range element identity.
-    std::optional<value_type> result;         ///< Retains a complete callable result.
-    range_kind form = range_kind::range_full; ///< Retains source range form.
-    opaque_ownership operations; ///< Retains trusted callable clone/destruction operations.
-    std::shared_ptr<const type_plan> release_next; ///< Links only dying, uniquely owned plans.
+    // [knowledge] Fields and offsets are canonical and category-appropriate. resource_ends
+    // contains cumulative source-order carrier counts; predicate caches include nested types.
+    // Only dying, uniquely owned plans may use release_next or otherwise mutate published data.
+    type_kind kind = type_kind::tuple;        // Identifies the shape.
+    layout bytes{0, 1};                       // Describes its canonical representation.
+    bool owns = true;                         // Records complete ownership capabilities.
+    bool parameter = true;                    // Caches built-in/composite parameter admission.
+    std::size_t resources = 0;                // Counts direct ownership carriers.
+    std::type_index leaf{typeid(void)};       // Identifies a concrete leaf.
+    std::vector<value_type> fields;           // Owns ordered fields or callable parameters.
+    std::vector<std::size_t> offsets;         // Owns ordered aggregate offsets.
+    std::vector<std::size_t> resource_ends;   // Caches cumulative source-order carrier counts.
+    std::vector<std::string> names;           // Owns record field names.
+    std::string identity;                     // Owns nominal record identity.
+    std::optional<value_type> element;        // Retains array/range element identity.
+    std::optional<value_type> result;         // Retains a complete callable result.
+    range_kind form = range_kind::range_full; // Retains source range form.
+    opaque_ownership operations; // Retains trusted callable clone/destruction operations.
+    std::shared_ptr<const type_plan> release_next; // Links only dying, uniquely owned plans.
 };
 
-/// Hashes a memoized metadata pair without depending on structural expansion.
+/// A hash function for immutable metadata identity pairs.
 struct plan_pair_hash {
     /// Combines pointer identities for immutable plan-pair lookup.
     std::size_t operator()(
@@ -69,10 +71,11 @@ value_type type_access::install_callable_ownership(const value_type& signature,
 
 value_type type_access::bind_runtime_ownership(const value_type& type, opaque_ownership canonical) {
     assert(canonical.clone && canonical.destroy);
-    /// Retains the next child to visit in one borrowed source plan.
+    /// A borrowed position in a source plan's child sequence.
     struct visit {
-        const value_type* type; ///< Borrows a descriptor owned by the input graph.
-        std::size_t next = 0;   ///< Counts already scheduled child edges.
+        // [knowledge] type remains input-owned; next counts already scheduled child edges.
+        const value_type* type;
+        std::size_t next = 0;
     };
     std::vector<visit> pending{{&type}};
     std::unordered_map<const type_plan*, value_type> bound;
@@ -222,9 +225,13 @@ void require_compatible(const value_type& expected, const value_type& actual) {
         throw std::invalid_argument("incompatible value shape or opaque ownership operations");
 }
 
-/// Computes canonical offsets, tail padding, and aggregate ownership capabilities.
+/// Extends a plan's canonical layout and complete aggregate capabilities with source-order fields.
+///
+/// \pre plan has a valid canonical prefix, including matching cumulative resource counts.
 /// Throws std::overflow_error if byte extent arithmetic overflows.
-/// Complexity: O(field count) time and offset space.
+/// Also throws std::overflow_error if the ownership-carrier count overflows.
+/// Failure may leave a partially extended unpublished plan.
+/// Complexity: O(field count) amortized time and added offset/count result storage.
 void canonical_layout(type_plan& plan, std::span<const value_type> fields) {
     // Accumulate source-order layouts and retain canonical field offsets.
     for (const auto& field : fields) {
@@ -246,7 +253,7 @@ void canonical_layout(type_plan& plan, std::span<const value_type> fields) {
     plan.bytes.size = align_offset(plan.bytes.size, plan.bytes.alignment);
 }
 
-/// Reads the cached built-in/composite parameter predicate.
+/// Returns whether the type satisfies built-in/composite callable parameter admission.
 bool parameter_allowed(const value_type& type) { return type_access::parameter_allowed(type); }
 
 } // namespace cel::detail

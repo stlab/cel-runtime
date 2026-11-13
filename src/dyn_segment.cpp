@@ -14,7 +14,8 @@
 #include <stdexcept>
 
 namespace cel::detail {
-/// Owns checked instructions and their complete frozen boundary requirements.
+/// A frozen program with complete boundary types and storage requirements.
+///
 /// Shared handles have reference semantics; captures are never shallow value-copied.
 struct frozen_program : retirement_node {
     raw_segment body;                 ///< Owns stable captures and const dispatch records.
@@ -22,7 +23,7 @@ struct frozen_program : retirement_node {
     value_type result;                ///< Retains the single final owner plan.
     stack_requirements requirements;  ///< Retains statically known canonical frame peaks.
     stack_origin origin;              ///< Retains independent/dependent execution identity.
-    /// Freezes successfully constructed code and metadata by normal ownership transfer.
+    /// Takes ownership of checked code and its complete boundary metadata.
     frozen_program(raw_segment input,
                    std::vector<argument_read> arguments,
                    value_type output,
@@ -30,35 +31,41 @@ struct frozen_program : retirement_node {
                    stack_origin ambient) :
         retirement_node(dispose_program), body(std::move(input)), reads(std::move(arguments)),
         result(std::move(output)), requirements(required), origin(ambient) {}
-    /// Detaches the owned arena before deleting ordinary immutable metadata.
-    /// Complexity: O(released read/result metadata); captures retire through the queue.
+    /// Retires this program's boundary metadata, deferring capture retirement.
+    ///
+    /// \pre base is the live frozen_program selected by its retirement callback.
+    ///
+    /// Complexity: O(read count + released metadata) time; queued captures have their own costs.
     static void dispose_program(retirement_node& base, retirement_queue& queue) noexcept {
         auto& program = static_cast<frozen_program&>(base);
         segment_access::retire(program.body, queue);
         delete &program;
     }
 };
-/// Retains a canonical literal and detaches its runtime-owned children before capture deletion.
+/// An owned literal that supplies independent results under value's copy semantics.
 struct literal_instruction {
     value literal; ///< Owns one complete literal, independent of execution results.
     /// Pushes an independent clone onto the caller's frame.
+    ///
     /// Complexity: O(canonical payload and ownership work).
     void operator()(frame& scope) const { scope.push_clone(literal); }
-    /// Retires literal ownership into the enclosing executable worklist.
-    /// Complexity: O(canonical ownership paths and array nodes); no allocation.
+    /// Releases literal ownership into the enclosing retirement operation without allocating.
+    ///
+    /// Complexity: canonical ownership traversal and released literal metadata.
     void retire(retirement_queue& queue) noexcept { value_access::retire(literal, queue); }
 };
-/// Shares both immutable branches and exposes their managed ownership edges for retirement.
+/// A conditional with shared immutable true and false bodies.
 struct branch_instruction {
     retirement_ptr<const frozen_program> yes; ///< Retains the selected-true body.
     retirement_ptr<const frozen_program> no;  ///< Retains the selected-false body.
     /// Executes only the body selected by the consumed boolean.
+    ///
     /// Complexity: O(selected body execution work).
     void operator()(frame& scope) const {
         const bool condition = scope.pop<bool>();
         (condition ? yes->body : no->body).execute(scope);
     }
-    /// Retires both body references into one local last-owner operation.
+    /// Releases both body references into the supplied retirement operation.
     void retire(retirement_queue& queue) noexcept {
         yes.retire(queue);
         no.retire(queue);

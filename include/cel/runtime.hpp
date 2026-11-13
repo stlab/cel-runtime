@@ -4,6 +4,7 @@
 
 /// \file
 /// Provides values, program builders, and reusable execution for C++20 runtime clients.
+///
 /// Include this header and link to cel::runtime to build and evaluate programs.
 /// This library does not parse CEL source or register built-in operations.
 /// \see cel::dyn_segment and cel::raw_stack for cached execution and reusable storage.

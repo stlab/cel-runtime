@@ -12,7 +12,9 @@
 
 namespace {
 
-/// Validates a nonzero power-of-two alignment, throwing std::invalid_argument otherwise.
+/// Checks that alignment is a nonzero power of two.
+///
+/// Throws std::invalid_argument otherwise.
 void validate_alignment(std::size_t alignment) {
     if (!std::has_single_bit(alignment))
         throw std::invalid_argument("alignment must be a nonzero power of two");
