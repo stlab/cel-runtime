@@ -2,11 +2,17 @@
 #ifndef CEL_RUNTIME_TYPE_OPS_HPP
 #define CEL_RUNTIME_TYPE_OPS_HPP
 
+#include <array>
 #include <cel/runtime/value_type.hpp>
+#include <limits>
+#include <optional>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace cel::detail {
 
-/// A borrowed ownership-carrying slot in canonical fixed-aggregate bytes.
+/// A borrowed carrier or reusable ownership subrange in canonical fixed-aggregate bytes.
 ///
 /// The containing descriptor retains type; its views must remain valid while the slot is used.
 struct ownership_slot {
@@ -35,6 +41,39 @@ struct opaque_ownership {
     void (*destroy)(std::byte*) noexcept = nullptr;
 };
 static_assert(std::is_trivially_copyable_v<opaque_ownership>);
+
+/// Hashes borrowed immutable descriptor identity pairs.
+struct plan_pair_hash {
+    /// Combines the two metadata identities.
+    std::size_t operator()(
+        const std::pair<const type_plan*, const type_plan*>& pair) const noexcept;
+};
+
+/// Memoizes successful shape and ownership checks for one checked operation.
+///
+/// Retains compared descriptors, including consumed inputs, until the operation ends.
+/// Shape and ownership successes are independent; failed comparisons are never cached.
+/// For an operation ending at its first mismatch, complexity is expected O(P + E + S)
+/// total comparison time and O(P + E) auxiliary space for distinct compared pairs P,
+/// their edges E, and compared name bytes S.
+class compatibility_context {
+    friend struct type_access;
+    using pair = std::pair<const type_plan*, const type_plan*>;
+    std::unordered_set<pair, plan_pair_hash> _semantic;
+    std::unordered_set<pair, plan_pair_hash> _operations;
+    std::vector<value_type> _retained;
+    std::size_t _compared = 0;
+
+public:
+    /// Starts an empty operation-local memo without allocating.
+    compatibility_context() = default;
+    /// Checks complete shapes and ownership operations and returns the newly compared pair count.
+    ///
+    /// Reuses successful pair checks; shape and operation comparisons count separately.
+    /// Throws std::invalid_argument on mismatch, leaving inputs unchanged.
+    /// Failed checks do not authorize a later comparison.
+    std::size_t require(const value_type& expected, const value_type& actual);
+};
 
 /// Trusted access to immutable type identity and ownership capabilities.
 ///
@@ -82,6 +121,14 @@ struct type_access {
     /// visited plan pairs P, their edges E, and compared identity/name bytes S.
     /// S is zero for operation-only comparisons; identical plans compare in O(1).
     static bool compare_plans(const value_type& expected, const value_type& actual, bool semantic);
+    /// Compares plans using an operation's successful checks for the selected comparison.
+    ///
+    /// \pre For operation-only comparison, complete semantic shapes already match.
+    /// Follows compare_plans's contract and retains any newly compared descriptors.
+    static bool compare_plans(const value_type& expected,
+                              const value_type& actual,
+                              bool semantic,
+                              compatibility_context& context);
     /// Returns the number of direct owning carriers in fixed canonical bytes.
     ///
     /// Arrays/callables count as one carrier; their separately owned children are not counted.
@@ -90,13 +137,39 @@ struct type_access {
     ///
     /// Client leaves and callables are not admitted, including inside empty arrays/full ranges.
     static bool parameter_allowed(const value_type& type) noexcept;
-    /// Locates an ownership slot by ordinal without recursion or allocation.
+    /// Borrows the compiled ownership sequence's immediate reusable ranges.
     ///
-    /// \pre ordinal < resources(type).
-    /// The result borrows metadata retained by type.
-    /// Complexity: O(sum of log(field count + 1) along the selected aggregate path)
-    /// time and O(1) auxiliary space.
-    static ownership_slot resource(const value_type& type, std::size_t ordinal) noexcept;
+    /// Scalars and carriers have no subranges. Single-range paths are collapsed;
+    /// branching sequences put a largest carrier-count range last.
+    /// The view remains valid while type's metadata is retained.
+    static std::span<const ownership_slot> ownership_ranges(const value_type& type) noexcept;
+};
+
+/// Scans a compiled ownership sequence without allocation or nesting-dependent call space.
+///
+/// Borrows the source descriptor for its lifetime. Each next() performs one constant-time
+/// transition; the complete scan takes O(1 + carrier count) time and O(1) auxiliary space.
+class ownership_cursor {
+    /// A borrowed sequence position and its byte offset from the traversal root.
+    struct position {
+        const value_type* type;
+        std::size_t offset;
+        std::size_t next = 0;
+    };
+    // Every pending non-final descent halves the carrier count. Final descents replace
+    // their frame, so machine-word width bounds the stack even for skewed descriptors.
+    std::array<position, std::numeric_limits<std::size_t>::digits + 1> _pending;
+    std::size_t _size = 0;
+
+public:
+    /// Starts a traversal of type's direct ownership carriers.
+    explicit ownership_cursor(const value_type& type) noexcept;
+    /// Reports whether every carrier has been emitted.
+    bool empty() const noexcept { return _size == 0; }
+    /// Advances one traversal transition, returning a slot only when it reaches a carrier.
+    ///
+    /// \pre The cursor is not empty.
+    std::optional<ownership_slot> next() noexcept;
 };
 
 /// Validates complete type-level cloning and destruction capabilities.
