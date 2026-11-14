@@ -55,6 +55,9 @@ struct type_access;
 /// Access to one descriptor must not race its replacement or destruction.
 /// Factories retain component descriptors and copy supplied names; input spans and strings
 /// need not outlive construction.
+/// Ownership sequences share descendant ranges instead of expanding a table at every node.
+/// Across a descriptor graph, plan construction and metadata are linear in nodes and edges,
+/// plus copied identity/name bytes; record-name validation has expected linear time.
 ///
 /// See value's shared example for record construction and descriptor copying.
 /// Example: `auto numbers = value_type::array(value_type::leaf<double>()); auto copy = numbers;`.

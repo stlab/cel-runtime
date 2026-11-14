@@ -31,6 +31,13 @@ struct other_leaf {
 bool fail_test_clone = false;
 /// Counts live resources created by the synthetic opaque clone callback.
 int live_test_owners = 0;
+/// Requests a failure after a known initialized ownership prefix.
+int test_clones_until_failure = -1;
+/// Identifies a synthetic clone failure without allocating a diagnostic.
+struct test_clone_error : std::exception {
+    /// Returns a fixed diagnostic without allocating.
+    const char* what() const noexcept override { return "synthetic clone failure"; }
+};
 
 /// Clones a synthetic opaque owner without implementing a callable object.
 void clone_test_owner(const std::byte* source, std::byte* destination) {
@@ -38,6 +45,10 @@ void clone_test_owner(const std::byte* source, std::byte* destination) {
     std::memcpy(static_cast<void*>(&pointer), source, sizeof(pointer));
     auto copy = std::make_unique<int>(*pointer);
     if (fail_test_clone) throw std::runtime_error("synthetic clone failure");
+    if (test_clones_until_failure == 0) {
+        throw test_clone_error{};
+    }
+    if (test_clones_until_failure > 0) --test_clones_until_failure;
     ++live_test_owners;
     pointer = copy.release();
     std::memcpy(destination, static_cast<const void*>(&pointer), sizeof(pointer));
@@ -53,6 +64,103 @@ void destroy_test_owner(std::byte* data) noexcept {
 
 /// Supplies a distinct installed operation pair to test representation admission.
 void destroy_test_owner_alternative(std::byte* data) noexcept { destroy_test_owner(data); }
+
+/// Catches repeating complete comparisons for every empty element with shared metadata.
+TEST_CASE("checked arrays reuse equivalent descriptor comparisons across elements") {
+    constexpr std::size_t depth = 128;
+    constexpr std::size_t count = 128;
+    auto expected = cel::value_type::leaf<bool>();
+    auto actual = cel::value_type::leaf<bool>();
+    for (std::size_t i = 0; i != depth; ++i) {
+        expected = cel::value_type::array(expected);
+        actual = cel::value_type::array(actual);
+    }
+    const auto empty = cel::value::array(actual.element(), {});
+    const std::vector<cel::value> children(count, empty);
+    cel::value result;
+    result = cel::value::array(expected, children);
+    CHECK(result.size() == count);
+    CHECK(result.at(count - 1).size() == 0);
+
+    auto consumed = children;
+    result = cel::detail::value_access::take_array(expected, consumed);
+    for (const auto& child : consumed)
+        CHECK(child.type().same_shape(cel::value{}.type()));
+
+    cel::detail::compatibility_context comparisons;
+    std::size_t work = 0;
+    for (const auto& child : children)
+        work += comparisons.require(expected, child.type());
+    CHECK(work > 0);
+    CHECK(work <= 2 * (depth + 1));
+
+    for (std::size_t i = 0; i != count; ++i) {
+        const auto distinct = cel::value::array(actual.element(), {});
+        work += comparisons.require(expected, distinct.type());
+    }
+    CHECK(work <= 2 * (depth + count + 1));
+}
+
+/// Catches memo entries authorizing unequal shapes or foreign operations after a failed check.
+TEST_CASE("operation comparison caches keep shape and ownership checks independent") {
+    const auto signature = cel::value_type::callable({}, cel::value_type::leaf<double>());
+    const auto expected = cel::detail::type_access::install_callable_ownership(
+        signature, {clone_test_owner, destroy_test_owner});
+    cel::detail::compatibility_context comparisons;
+    for (int i = 0; i != 128; ++i) {
+        const auto actual = cel::detail::type_access::install_callable_ownership(
+            signature,
+            {clone_test_owner, i % 2 == 0 ? destroy_test_owner : destroy_test_owner_alternative});
+        if (i % 2 == 0) {
+            CHECK_NOTHROW(comparisons.require(expected, actual));
+        } else {
+            CHECK_THROWS_AS(comparisons.require(expected, actual), std::invalid_argument);
+            CHECK_THROWS_AS(comparisons.require(expected, actual), std::invalid_argument);
+        }
+    }
+    const auto one = cel::value_type::tuple(std::array{expected});
+    const auto two = cel::value_type::tuple(std::array{expected, expected});
+    CHECK_THROWS_AS(comparisons.require(one, two), std::invalid_argument);
+    CHECK_THROWS_AS(comparisons.require(one, two), std::invalid_argument);
+    CHECK_NOTHROW(comparisons.require(one, cel::value_type::tuple(std::array{expected})));
+
+    const auto foreign = cel::detail::type_access::install_callable_ownership(
+        signature, {clone_test_owner, destroy_test_owner_alternative});
+    const auto valid_empty = cel::value::array(expected, {});
+    const auto foreign_empty = cel::value::array(foreign, {});
+    CHECK_THROWS_AS(cel::value::array(valid_empty.type(), std::array{valid_empty, foreign_empty}),
+                    std::invalid_argument);
+    auto destination = cel::value::array(valid_empty.type(), std::array{valid_empty});
+    CHECK_THROWS_AS(destination.set(0, foreign_empty), std::invalid_argument);
+    CHECK(destination.at(0).type().compatible_with(valid_empty.type()));
+}
+
+/// Catches leaking a partially cloned traversal-order prefix.
+TEST_CASE("partial ownership traversal cleans its initialized prefix") {
+    const auto installed = cel::detail::type_access::install_callable_ownership(
+        cel::value_type::callable({}, cel::value_type::leaf<double>()),
+        {clone_test_owner, destroy_test_owner});
+    int number = 42;
+    int* pointer = &number;
+    std::array<std::byte, sizeof(pointer)> bytes;
+    std::memcpy(bytes.data(), static_cast<const void*>(&pointer), sizeof(pointer));
+    const auto callable = cel::detail::value_access::copy(installed, bytes.data());
+    const auto array = cel::value::from(std::vector<double>{2.0, 3.0});
+    const auto source =
+        cel::value::tuple(std::array{callable, array, callable, array, callable, array});
+    const auto live = live_test_owners;
+    test_clones_until_failure = 2;
+    bool caught = false;
+    try {
+        auto copy = source;
+    } catch (const test_clone_error&) {
+        caught = true;
+    }
+    test_clones_until_failure = -1;
+    CHECK(caught);
+    CHECK(live_test_owners == live);
+    CHECK(source.at(1).at(0).as<double>() == 2.0);
+}
 
 /// Catches layout-only comparison and ownership traversal before unequal-shape rejection.
 TEST_CASE("public compatibility requires complete semantic shapes") {
