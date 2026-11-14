@@ -1,14 +1,111 @@
 // SPDX-License-Identifier: BSL-1.0
+#include "type_ops.hpp"
 #include "value_ops.hpp"
 #include <cel/runtime/value.hpp>
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <limits>
 #include <stdexcept>
 #include <vector>
+
+/// Checks every carrier offset and a linear bound on constant-time traversal steps.
+/// Complexity: O(count log count) time and O(count) temporary space.
+void check_ownership_traversal(const cel::value_type& type, std::size_t count) {
+    cel::detail::ownership_cursor cursor(type);
+    std::vector<std::size_t> offsets;
+    std::size_t steps = 0;
+    while (!cursor.empty()) {
+        if (const auto slot = cursor.next()) {
+            CHECK((slot->type->kind() == cel::type_kind::array));
+            offsets.push_back(slot->offset);
+        }
+        ++steps;
+    }
+    REQUIRE((offsets.size() == count));
+    CHECK((steps <= 3 * count));
+    std::sort(offsets.begin(), offsets.end());
+    for (std::size_t i = 0; i != count; ++i)
+        CHECK((offsets[i] == i * sizeof(void*)));
+}
+
+/// Catches repeated root searches and expanded metadata at every skewed descriptor.
+TEST_CASE("ownership ranges traverse wide and skewed aggregates in linear work") {
+    constexpr std::size_t count = 2048;
+    const auto element = cel::value::from(std::vector<double>{3.0});
+    const cel::value_type unit;
+    const std::vector<cel::value> fields(count, element);
+    const auto flat = cel::value::tuple(fields);
+    check_ownership_traversal(flat.type(), count);
+
+    for (const bool heavy_first : {false, true}) {
+        auto type = element.type();
+        std::size_t ranges = 0;
+        std::size_t range_bytes = 0;
+        for (std::size_t i = 1; i != count; ++i) {
+            const auto children =
+                heavy_first ? std::array{type, element.type()} : std::array{element.type(), type};
+            type = cel::value_type::tuple(children);
+            const auto compiled = cel::detail::type_access::ownership_ranges(type);
+            ranges += compiled.size();
+            range_bytes += compiled.size_bytes();
+        }
+        CHECK(ranges <= 2 * count);
+        CHECK(range_bytes <= 2 * count * sizeof(cel::detail::ownership_slot));
+        check_ownership_traversal(type, count);
+        auto original =
+            cel::detail::value_access::copy(type, cel::detail::value_access::data(flat));
+        auto copy = original;
+        original = cel::value{};
+        auto restored =
+            cel::detail::value_access::copy(flat.type(), cel::detail::value_access::data(copy));
+        CHECK(restored.at(0).at(0).as<double>() == 3.0);
+        CHECK(restored.at(count - 1).at(0).as<double>() == 3.0);
+        copy = cel::value{};
+        restored = cel::value{};
+        type = unit;
+    }
+}
+
+/// Supplies a nonowning client field with extended alignment.
+struct alignas(256) ownership_aligned_leaf {
+    std::array<std::byte, 256> bytes; ///< Stores a trivially copyable opaque payload.
+};
+
+/// Catches incorrect range offsets when zero-byte and over-aligned fields precede carriers.
+TEST_CASE("record ownership ranges preserve canonical offsets around nonowning fields") {
+    const auto array = cel::value::from(std::vector<double>{5.0});
+    const auto wide = cel::value::from(ownership_aligned_leaf{});
+    const auto type =
+        cel::value_type::record("mixed", std::array{cel::record_field{"unit", cel::value_type{}},
+                                                    cel::record_field{"bytes", wide.type()},
+                                                    cel::record_field{"items", array.type()}});
+    auto original = cel::value::record(type, std::array{cel::value{}, wide, array});
+    auto copy = original;
+    copy.set_field("items", cel::value::from(std::vector<double>{9.0}));
+    CHECK(original.field("items").at(0).as<double>() == 5.0);
+    CHECK(copy.field("items").at(0).as<double>() == 9.0);
+    original = cel::value{};
+    copy = cel::value{};
+}
+
+/// Catches expansion of shared ranges and traversal proportional to unary nesting.
+TEST_CASE("ownership ranges reuse shared descendants and collapse unary paths") {
+    auto type = cel::value_type::array(cel::value_type::leaf<double>());
+    std::size_t ranges = 0;
+    for (std::size_t i = 0; i != 12; ++i) {
+        type = cel::value_type::tuple(std::array{type, type});
+        ranges += cel::detail::type_access::ownership_ranges(type).size();
+    }
+    CHECK(ranges <= 24);
+    check_ownership_traversal(type, 4096);
+    for (std::size_t i = 0; i != 50000; ++i)
+        type = cel::value_type::tuple(std::array{type});
+    check_ownership_traversal(type, 4096);
+}
 /// Catches recursive last-reference release, including during exception cleanup.
 TEST_CASE("deep descriptor release and exception unwinding are stack independent") {
     const cel::value_type unit;

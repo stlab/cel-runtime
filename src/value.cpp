@@ -89,34 +89,37 @@ struct array_owner {
     /// Destroys initialized ownership without allocating or consuming nesting-dependent stack.
     ///
     /// Client operations retain their own costs and behavior.
-    /// Complexity: O(N + L + C + D) time and O(1) runtime auxiliary space, with costs as in value.
+    /// Complexity: linear in released value area; O(1) runtime auxiliary space.
     ~array_owner();
 };
 
-/// Retires a source-order ownership-carrier prefix into enclosing retirement operations.
+/// Retires a traversal-order ownership-carrier prefix into enclosing retirement operations.
 ///
 /// \pre Exactly the first count ownership carriers in data are valid and exclusively
 /// owned; count <= type_access::resources(type). pending and queue remain alive until
 /// their scheduled owners retire.
 /// Source carrier ownership is retired; array storage is released when pending is drained.
-/// Complexity: O(L + C) time and O(1) runtime auxiliary space, with costs as in value.
+/// Complexity: linear in carrier count, plus held destruction costs; O(1) runtime auxiliary space.
 void retire_resources(const value_type& type,
                       std::byte* data,
                       std::size_t count,
                       array_owner*& pending,
                       retirement_queue& queue) noexcept {
-    // Cached ownership ranks skip every non-owning scalar and zero-sized subtree.
+    ownership_cursor cursor(type);
+    // Scan the compiled sequence once, stopping at the initialized carrier prefix.
     while (count != 0) {
-        const auto slot = type_access::resource(type, --count);
-        auto* address = byte_at(data, slot.offset);
-        if (slot.type->kind() == type_kind::array) {
+        const auto slot = cursor.next();
+        if (!slot) continue;
+        --count;
+        auto* address = byte_at(data, slot->offset);
+        if (slot->type->kind() == type_kind::array) {
             auto* node = read_array(address).owner;
             node->pending_next = pending;
             pending = node;
-        } else if (callable_access::installed(*slot.type)) {
+        } else if (callable_access::installed(*slot->type)) {
             callable_access::retire(address, queue);
         } else {
-            const auto operations = type_access::operations(*slot.type);
+            const auto operations = type_access::operations(*slot->type);
             assert(operations.destroy);
             if (!operations.destroy) std::terminate();
             operations.destroy(address);
@@ -129,8 +132,8 @@ void retire_resources(const value_type& type,
 /// \pre owner has exclusive valid prefix/partial ownership; pending and queue remain alive
 /// until their scheduled owners retire.
 /// Leaves no initialized element ownership in owner.
-/// Complexity: O(L + C) time and O(1) runtime auxiliary space, with costs as in value;
-/// scalar elements require no per-element retirement.
+/// Complexity: linear in initialized carriers, plus held destruction costs; O(1) runtime auxiliary
+/// space; scalar elements require no per-element retirement.
 void retire_elements(array_owner& owner, array_owner*& pending, retirement_queue& queue) noexcept {
     const auto resources = type_access::resources(owner.element);
     const auto stride = owner.element.byte_layout().size;
@@ -153,7 +156,7 @@ void retire_elements(array_owner& owner, array_owner*& pending, retirement_queue
 /// \pre pending links uniquely owned valid array nodes with discardable initialized
 /// prefixes; queue remains alive until scheduled executable owners retire.
 /// No runtime traversal allocation or nesting-dependent call space is used.
-/// Complexity: O(N + L + C + D) time and O(1) runtime auxiliary space, with costs as in value.
+/// Complexity: linear in released value area; O(1) runtime auxiliary space.
 void drain_arrays(array_owner*& pending, retirement_queue& queue) noexcept {
     // Detach each node before retiring its descendants and releasing its aligned bytes.
     while (pending) {
@@ -179,20 +182,23 @@ array_owner::~array_owner() {
 /// completed <= type_access::resources(type); pending retains uniquely owned partial clones.
 /// On success completed counts all direct carriers and pending retains descendants still
 /// needing cloning. Failure preserves a discardable prefix counted by completed.
-/// Complexity: O(B + N + L + C) time and new owned result storage, with costs as in value;
-/// O(1) runtime auxiliary space excluding opaque operations.
+/// Complexity: linear in carriers and copied array bytes, plus held clone costs; new owned result
+/// storage; O(1) runtime auxiliary space excluding opaque operations.
 void clone_resources(const value_type& type,
                      const std::byte* source,
                      std::byte* destination,
                      std::size_t& completed,
                      array_owner*& pending) {
     const auto resources = type_access::resources(type);
+    ownership_cursor cursor(type);
+    std::size_t ordinal = 0;
     // Construct one independent carrier at a time without recursively cloning child arrays.
     while (completed != resources) {
-        const auto slot = type_access::resource(type, completed);
-        const auto* input = byte_at(source, slot.offset);
-        auto* output = byte_at(destination, slot.offset);
-        if (slot.type->kind() == type_kind::array) {
+        const auto slot = cursor.next();
+        if (!slot || ordinal++ < completed) continue;
+        const auto* input = byte_at(source, slot->offset);
+        auto* output = byte_at(destination, slot->offset);
+        if (slot->type->kind() == type_kind::array) {
             const auto* original = read_array(input).owner;
             assert(original->initialized == original->count && original->partial_resources == 0);
             auto copy = std::make_unique<array_owner>(original->element, original->count);
@@ -204,7 +210,7 @@ void clone_resources(const value_type& type,
             write_carrier(output, owner);
             pending = owner;
         } else {
-            const auto operations = type_access::operations(*slot.type);
+            const auto operations = type_access::operations(*slot->type);
             if (!operations.clone)
                 throw std::invalid_argument("callable ownership is not installed");
             operations.clone(input, output);
@@ -215,9 +221,11 @@ void clone_resources(const value_type& type,
 
 void clone_payload(const value_type& type, const std::byte* source, std::byte* destination) {
     // Reject deferred direct carriers before reading any source representation.
-    for (std::size_t i = 0; i != type_access::resources(type); ++i) {
-        const auto slot = type_access::resource(type, i);
-        if (slot.type->kind() == type_kind::callable && !type_access::operations(*slot.type).clone)
+    ownership_cursor cursor(type);
+    while (!cursor.empty()) {
+        const auto slot = cursor.next();
+        if (slot && slot->type->kind() == type_kind::callable &&
+            !type_access::operations(*slot->type).clone)
             throw std::invalid_argument("callable ownership is not installed");
     }
     const auto extent = type.byte_layout().size;
@@ -279,7 +287,7 @@ const value_type& child_type(const value_type& type, std::size_t index) {
 ///
 /// \pre type is a tuple, record, or range, count <= arity, and exactly that prefix is
 /// valid owned data, exclusively accessible for retirement.
-/// Complexity: O(F + N + L + C + D) time and O(1) runtime auxiliary space, with costs as in value.
+/// Complexity: linear in field count and released value area; O(1) runtime auxiliary space.
 void destroy_prefix(const value_type& type, std::byte* data, std::size_t count) noexcept {
     while (count != 0) {
         --count;
@@ -306,8 +314,7 @@ struct owned_payload {
     /// Destroys initialized ownership and releases outer storage without recursion/allocation.
     ///
     /// Client operations retain their own costs and behavior.
-    /// Complexity: O(F + N + L + C + D) time and O(1) runtime auxiliary space, with costs as in
-    /// value.
+    /// Complexity: linear in field count and released value area; O(1) runtime auxiliary space.
     ~owned_payload() {
         if (type.kind() == type_kind::tuple || type.kind() == type_kind::record ||
             type.kind() == type_kind::range)
@@ -493,9 +500,10 @@ value value::array_owned(value_type element, std::span<value> children) {
     auto result = std::make_unique<detail::owned_payload>(value_type::array(element));
     auto owner = std::make_unique<detail::array_owner>(element, children.size());
     const auto stride = element.byte_layout().size;
+    detail::compatibility_context comparisons;
     // Transfer each canonical element and retire its public boundary owner.
     for (auto& child : children) {
-        detail::require_compatible(element, child.type());
+        comparisons.require(element, child.type());
         if (stride != 0)
             std::memcpy(detail::byte_at(owner->bytes.data(), owner->initialized * stride),
                         raw_data(child), stride);
@@ -511,9 +519,10 @@ value value::array(value_type element, std::span<const value> elements) {
     auto result = std::make_unique<detail::owned_payload>(value_type::array(element));
     auto owner = std::make_unique<detail::array_owner>(element, elements.size());
     const auto stride = element.byte_layout().size;
+    detail::compatibility_context comparisons;
     // Clone directly into packed canonical element bytes, tracking only the initialized prefix.
     for (const auto& child : elements) {
-        detail::require_compatible(element, child.type());
+        comparisons.require(element, child.type());
         detail::clone_payload(element, raw_data(child),
                               detail::byte_at(owner->bytes.data(), owner->initialized * stride));
         ++owner->initialized;
@@ -526,11 +535,12 @@ value value::aggregate(value_type type, std::span<const value> fields) {
     if (type.offsets().size() != fields.size())
         throw std::invalid_argument("wrong aggregate arity");
     auto result = std::make_unique<detail::owned_payload>(std::move(type));
+    detail::compatibility_context comparisons;
     // Completed children are independently owned; later failures destroy precisely that prefix.
     for (const auto& child : fields) {
         const auto index = result->initialized;
         const auto& expected = detail::child_type(result->type, index);
-        detail::require_compatible(expected, child.type());
+        comparisons.require(expected, child.type());
         detail::clone_payload(expected, raw_data(child),
                               detail::byte_at(result->bytes.data(), result->type.offsets()[index]));
         ++result->initialized;
@@ -571,7 +581,8 @@ void value::set(std::size_t index, const value& replacement) {
     if (index >= size()) throw std::out_of_range("child index out of bounds");
     const auto& expected =
         type().kind() == type_kind::array ? type().element() : detail::child_type(type(), index);
-    detail::require_compatible(expected, replacement.type());
+    detail::compatibility_context comparisons;
+    comparisons.require(expected, replacement.type());
     value copy(replacement);
     std::byte* destination = nullptr;
     if (type().kind() == type_kind::array) {

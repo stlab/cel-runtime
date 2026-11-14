@@ -27,8 +27,8 @@ public:
     /// Retires the initialized suffix with existing canonical ownership operations.
     ///
     /// Never allocates runtime traversal storage or recurses with ownership nesting.
-    /// Complexity: O(F + N + L + C + D) time, with costs as in value, including the
-    /// suffix's element count in F; O(1) runtime auxiliary space.
+    /// Complexity: linear in suffix element count and released value area;
+    /// O(1) runtime auxiliary space.
     ~array_builder();
     /// Disallows duplicated array ownership.
     array_builder(const array_builder&) = delete;
@@ -64,8 +64,8 @@ public:
 /// nested inside arrays; the broader rejection case needs resolution.
 /// Failure destroys every constructed child; destination remains uninitialized.
 ///
-/// Complexity: O(B + N + L + C + D) time and new owned result storage, with costs
-/// as in value; O(1) runtime auxiliary space excluding opaque operations.
+/// Complexity: linear in source value area, plus held clone/destruction costs;
+/// new owned result storage and O(1) runtime auxiliary space excluding opaque operations.
 /// Canonical traversal and cleanup use no nesting-dependent call space.
 void clone_payload(const value_type& type, const std::byte* source, std::byte* destination);
 
@@ -75,8 +75,8 @@ void clone_payload(const value_type& type, const std::byte* source, std::byte* d
 /// accessible for retirement.
 /// Never allocates or throws. Bytewise transfer must retire the source without this call.
 /// Runtime retirement uses no nesting-dependent call space; client operations retain their costs.
-/// Complexity: O(N + L + C + D) time and O(1) runtime auxiliary space, with costs as
-/// in value. Scalar arrays require no per-element retirement.
+/// Complexity: linear in retired value area, plus held destruction costs;
+/// O(1) runtime auxiliary space. Scalar arrays require no per-element retirement.
 void destroy_payload(const value_type& type, std::byte* data) noexcept;
 /// Retires a complete payload into an enclosing runtime executable retirement operation.
 ///
@@ -84,7 +84,7 @@ void destroy_payload(const value_type& type, std::byte* data) noexcept;
 /// accessible for retirement; queue remains alive until enqueued owners retire.
 /// Retires array storage now and schedules installed executable owners with queue.
 /// Never allocates runtime traversal storage or recurses with ownership nesting.
-/// Complexity: O(N + L + C + D) time and O(1) runtime auxiliary space, with costs as in value.
+/// Complexity: linear in retired value area; O(1) runtime auxiliary space.
 void destroy_payload(const value_type& type, std::byte* data, retirement_queue& queue) noexcept;
 
 /// Trusted access between public owners and canonical raw representations.
@@ -96,14 +96,14 @@ struct value_access {
     /// \pre owner is exclusively accessible and queue remains alive until enqueued owners retire.
     /// Leaves owner as source unit and releases its outer bytes and metadata reference.
     /// Never allocates runtime traversal storage or recurses with ownership nesting.
-    /// Complexity: O(N + L + C + D) time and O(1) runtime auxiliary space, with costs as in value.
+    /// Complexity: linear in released value area; O(1) runtime auxiliary space.
     static void retire(value& owner, retirement_queue& queue) noexcept;
     /// Transfers canonical ownership into a caller-provided uninitialized extent.
     ///
     /// \pre destination is aligned, disjoint, and large enough for owner.type(); owner
     /// is exclusively accessible and the destination retains complete destruction metadata.
     /// Leaves owner unit and does not destroy the transferred payload.
-    /// Complexity: O(outer canonical bytes + released metadata D) time and O(1) auxiliary
+    /// Complexity: O(outer canonical bytes + released metadata area) time and O(1) auxiliary
     /// space; no allocation.
     static void release_to(value& owner, std::byte* destination) noexcept;
     /// Acquires outer storage and transfers a canonical owner without cloning its children.
@@ -120,8 +120,8 @@ struct value_access {
     /// \pre data is a readable valid owned representation of type whose descendants
     /// remain valid and unchanged during copying.
     /// Callable code retains explicit reference semantics; failure releases acquired owners.
-    /// Complexity: O(B + N + L + C + D) time and new owned result storage, with costs
-    /// as in value; O(1) runtime auxiliary space excluding opaque operations.
+    /// Complexity: linear in source value area, plus held clone/destruction costs;
+    /// new owned result storage and O(1) runtime auxiliary space excluding opaque operations.
     static value copy(const value_type& type, const std::byte* data);
     /// Takes uniquely owned boundary elements into packed canonical storage.
     ///
@@ -129,9 +129,9 @@ struct value_access {
     /// Throws std::invalid_argument for shape/operation mismatch, destroying completed transfers.
     /// Remaining sources retain ownership.
     /// Throws std::overflow_error for canonical extent overflow before consuming sources.
-    /// Complexity: O(B + F + M + D) expected time and packed result storage, with costs
-    /// as in value and M the sum of compatibility comparison costs; comparisons use
-    /// auxiliary space. Failure also retires consumed payloads.
+    /// Complexity: linear in transferred outer bytes, element count, and released metadata,
+    /// plus value's operation-wide checked-comparison costs; packed result storage.
+    /// Failure also retires consumed payloads.
     static value take_array(value_type element, std::span<value> children);
     /// Returns a packed array's logical length without acquiring ownership.
     ///
@@ -145,8 +145,8 @@ struct value_access {
     /// The destination retains complete destruction metadata.
     /// Source ownership is retired on return without cloning the selected child.
     /// Source outer bytes remain caller-owned; separately owned array storage is released.
-    /// Complexity: O(selected outer bytes + sibling F + N + L + C + D) time and
-    /// O(1) runtime auxiliary space, with costs as in value.
+    /// Complexity: linear in selected outer bytes, sibling count, and retired value area;
+    /// O(1) runtime auxiliary space.
     static void project(const value_type& type,
                         std::byte* source,
                         std::size_t index,

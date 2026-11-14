@@ -39,17 +39,20 @@ struct concrete_adapter;
 
 /// Holds any type representable by CEL, including client-defined types.
 ///
-/// In the costs below, B counts canonical bytes copied or initialized, F visited fixed
-/// fields or native elements, N visited array owners, and L sums ownership-slot selection
-/// costs: O(sum of log(field count + 1) along each selected aggregate path).
-/// F counts logical visits even when their byte extent is zero.
-/// C counts opaque clone/destruction and released executable costs, including client
-/// capture destruction; D counts released metadata nodes, edges,
-/// and identity/name bytes. W = B + F + N + L + C + D is the affected payload work.
-/// Owned result storage includes owner records and newly created metadata, not just byte
-/// buffers. Result storage is separate from auxiliary space. Native adapters may use call space
-/// proportional to concrete nesting; canonical cloning and retirement use no nesting-
-/// dependent call space or allocated traversal storage beyond cloned result owners.
+/// Value area includes canonical bytes, logical elements even when zero-sized, and owned
+/// runtime objects. Released area also includes executable and type metadata: nodes, edges,
+/// and stored names. Owned result storage includes owner records, not just byte buffers.
+/// Held client types retain their own copy and destruction costs.
+///
+/// Checked operations additionally compare distinct expected/actual descriptor pairs.
+/// Across one operation, this costs expected O(P + E + S) time and O(P + E) auxiliary
+/// space for compared pairs P, their edges E, and compared identity/name bytes S.
+/// This need not be linear in the separate descriptor graph areas.
+///
+/// Copies share immutable ownership plans with metadata linear in descriptor edges.
+/// Canonical cloning and retirement use constant runtime auxiliary space and no traversal
+/// allocations beyond cloned result owners. Native adapters may use call space proportional
+/// to concrete nesting; held client operations retain their own space requirements.
 ///
 /// Example: `auto number = value::from(2.0); auto copy = number;`.
 ///
@@ -96,8 +99,8 @@ class value {
     /// Leaves inputs unchanged.
     /// Throws std::invalid_argument for wrong arity or incompatible shape/ownership operations.
     /// Failure destroys every initialized child without allocating rollback copies.
-    /// Complexity: O(W + M) expected time and new owned result storage, where M is
-    /// the sum of complete compatibility comparison costs; comparisons use auxiliary space.
+    /// Complexity: linear in combined field area, plus the class's checked-comparison costs;
+    /// new owned result storage.
     static value aggregate(value_type type, std::span<const value> fields);
     /// Takes already-owned boundary children without cloning their mutable payloads.
     ///
@@ -105,8 +108,8 @@ class value {
     /// Throws std::invalid_argument for wrong shapes; failure releases completed transfers.
     /// Remaining sources retain ownership.
     /// Throws std::overflow_error for canonical extent overflow before consuming children.
-    /// Complexity: O(B + F + M + D) expected time and packed result storage, with M
-    /// the sum of compatibility comparison costs; failure also retires consumed payloads.
+    /// Complexity: linear in transferred outer bytes, element count, and released metadata,
+    /// plus checked-comparison costs; packed result storage. Failure also retires consumed area.
     static value array_owned(value_type element, std::span<value> children);
     /// Borrows a public owner's canonical bytes.
     ///
@@ -145,7 +148,7 @@ class value {
     ///
     /// \pre type is a tuple or record; count <= arity and exactly that prefix consists
     /// of valid owned representations in data.
-    /// Complexity: O(F + N + L + C + D) time and O(1) runtime auxiliary space.
+    /// Complexity: linear in field count and retired area; O(1) runtime auxiliary space.
     static void destroy_fields(const value_type& type, std::byte* data, std::size_t count) noexcept;
 
 public:
@@ -157,14 +160,14 @@ public:
     ///
     /// Runtime retirement uses no nesting-dependent call space; client capture destructors
     /// retain their own costs and behavior.
-    /// Complexity: O(F + N + L + C + D) time and O(1) runtime auxiliary space.
+    /// Complexity: linear in released area; O(1) runtime auxiliary space.
     ///
     /// See the class's shared copying example.
     ~value();
     /// Copies the source under the class's aggregate and callable copy semantics.
     ///
     /// Leaves the source unchanged; failure releases every acquired owner.
-    /// Complexity: O(W) time and new owned result storage, with O(1) runtime auxiliary
+    /// Complexity: linear in source area, with new owned result storage and O(1) runtime auxiliary
     /// space excluding opaque operations.
     ///
     /// See the class's shared copying example.
@@ -177,14 +180,14 @@ public:
     ///
     /// Leaves other unchanged; self-assignment leaves this value unchanged.
     /// Failure leaves this unchanged without copying its prior payload.
-    /// Complexity: O(source/old W) time and new source-sized result storage; runtime
-    /// auxiliary space is O(1), excluding opaque operations.
+    /// Complexity: linear in source and released area, with new source-sized result storage;
+    /// runtime auxiliary space is O(1), excluding opaque operations.
     ///
     /// Example: `auto target = value{}; target = source;`.
     value& operator=(const value& other);
     /// Releases old ownership, transfers other, and leaves other as unit; self-move is unchanged.
     ///
-    /// Complexity: O(old F + N + L + C + D) time and O(1) runtime auxiliary space.
+    /// Complexity: linear in released area; O(1) runtime auxiliary space.
     ///
     /// Example: `auto target = value{}; target = std::move(source); // source is unit.`
     value& operator=(value&& other) noexcept;
@@ -197,7 +200,7 @@ public:
     /// Copies a concrete leaf or recursively nested owning vector/tuple into a runtime value.
     ///
     /// Leaves source unchanged; pointer members in opaque leaves do not confer pointee ownership.
-    /// Complexity: O(B + F + first-use native_type construction) time and owned result
+    /// Complexity: linear in source area, plus first-use native_type construction; owned result
     /// storage; O(concrete nesting depth) adapter call space.
     ///
     /// Example: `auto numbers = value::from(std::vector<double>{1.0, 2.0});`.
@@ -210,8 +213,8 @@ public:
     /// Returned vectors and tuples own independent mutable payloads; leaf pointers remain pointers.
     ///
     /// Throws std::invalid_argument if the complete concrete type does not match.
-    /// Complexity: O(B + F + M + first-use native_type construction) expected time and
-    /// owned result storage, where M is the same_shape comparison cost; comparison
+    /// Complexity: linear in result area, plus same_shape comparison and first-use
+    /// native_type construction; owned result storage. Comparison
     /// auxiliary space and O(concrete nesting depth) adapter call space are additional.
     ///
     /// Example: `value::from(2.0).as<double>() == 2.0`.
@@ -225,8 +228,8 @@ public:
     ///
     /// Throws std::invalid_argument for incompatible elements, releasing earlier copies.
     /// Throws std::overflow_error if count times canonical element extent overflows.
-    /// Complexity: O(W + M) expected time and owned result storage, where M sums
-    /// element compatibility comparison costs; comparisons require auxiliary space.
+    /// Complexity: linear in combined element area and element count, plus the class's
+    /// checked-comparison costs across the entire construction; owned result storage.
     ///
     /// Example: `auto empty = value::array(value_type::leaf<double>(), {});`.
     static value array(value_type element, std::span<const value> elements);
@@ -235,8 +238,8 @@ public:
     /// Leaves input fields unchanged, with the class's copy semantics for every component.
     ///
     /// Throws std::overflow_error for layout overflow.
-    /// Complexity: O(W + field count) time and owned result storage; O(field count)
-    /// temporary descriptor space, in addition to opaque operation costs.
+    /// Complexity: linear in combined field area and field count; owned result storage and O(field
+    /// count) temporary descriptor space, in addition to opaque operation costs.
     ///
     /// Example: `auto unit = value::tuple({});`.
     static value tuple(std::span<const value> fields);
@@ -247,8 +250,8 @@ public:
     /// Throws std::invalid_argument for a non-record, wrong arity, or incompatible fields.
     /// Field compatibility includes complete shape and ownership operations.
     /// Failure releases earlier children without leaking resources.
-    /// Complexity: O(W + M) expected time and owned result storage, with M the sum of
-    /// field compatibility comparison costs; comparisons require auxiliary space.
+    /// Complexity: linear in combined field area and field count, plus the class's
+    /// checked-comparison costs across all fields; owned result storage.
     ///
     /// Example: `auto empty = value::record(value_type::record("sample", {}), {});`.
     static value record(value_type type, std::span<const value> fields);
@@ -273,7 +276,7 @@ public:
     /// Leaves this value unchanged, including on failure.
     ///
     /// Throws std::out_of_range for an invalid index, std::invalid_argument for non-composites.
-    /// Complexity: O(child W) time and owned result storage; O(1) runtime auxiliary
+    /// Complexity: linear in child area, with owned result storage and O(1) runtime auxiliary
     /// space excluding opaque operations.
     ///
     /// Example: `value::from(std::vector<double>{2.0}).at(0).as<double>() == 2.0`.
@@ -284,8 +287,8 @@ public:
     ///
     /// Throws std::out_of_range for invalid index, std::invalid_argument for shape mismatch
     /// or non-composites. Failure leaves the value unchanged; no rollback copy is needed.
-    /// Complexity: O(old/new child W + M) expected time and new child result storage,
-    /// where M is the compatibility comparison cost; comparison auxiliary space is additional.
+    /// Complexity: linear in replaced and replacement child area, plus the class's
+    /// checked-comparison costs; new child result storage.
     ///
     /// Example: `auto a = value::from(std::vector<double>{1.0}); a.set(0, value::from(2.0));`.
     void set(std::size_t index, const value& replacement);
@@ -293,7 +296,7 @@ public:
     ///
     /// Leaves this value unchanged, including on failure.
     /// Throws std::invalid_argument for a non-record or missing name.
-    /// Complexity: linear field-name lookup, including compared name bytes, plus O(child W)
+    /// Complexity: linear field-name lookup, including compared name bytes, plus linear child-area
     /// copying time and child result storage; O(1) runtime auxiliary space excluding opaque
     /// operations.
     ///
@@ -304,8 +307,8 @@ public:
     /// Throws std::invalid_argument for non-record/missing name or shape mismatch.
     /// Follows set's ownership compatibility, copy semantics, and unchanged-on-failure guarantee.
     /// Complexity: linear field-name lookup, including compared name bytes, plus
-    /// O(old/new child W + M) expected replacement time and new child result storage,
-    /// where M is compatibility comparison cost; comparison auxiliary space is additional.
+    /// replacement work in old/new child area and the class's checked-comparison costs;
+    /// new child result storage.
     ///
     /// See the class example for a complete record and field replacement.
     void set_field(std::string_view name, const value& replacement);

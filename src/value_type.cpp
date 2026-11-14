@@ -27,8 +27,9 @@ void require_ownership(const value_type& type) {
 
 /// Immutable complete semantic metadata after publication.
 struct type_plan {
-    // [knowledge] Fields and offsets are canonical and category-appropriate. resource_ends
-    // contains cumulative source-order carrier counts; predicate caches include nested types.
+    // [knowledge] Fields and offsets are canonical and category-appropriate. ownership
+    // borrows retained descendants, collapses unary paths, and puts a largest range last.
+    // Rebuild these borrowed ranges whenever copied fields are rebound.
     // Only dying, uniquely owned plans may use release_next or otherwise mutate published data.
     type_kind kind = type_kind::tuple;        // Identifies the shape.
     layout bytes{0, 1};                       // Describes its canonical representation.
@@ -38,7 +39,7 @@ struct type_plan {
     std::type_index leaf{typeid(void)};       // Identifies a concrete leaf.
     std::vector<value_type> fields;           // Owns ordered fields or callable parameters.
     std::vector<std::size_t> offsets;         // Owns ordered aggregate offsets.
-    std::vector<std::size_t> resource_ends;   // Caches cumulative source-order carrier counts.
+    std::vector<ownership_slot> ownership;    // Shares sublayouts without expanding descendants.
     std::vector<std::string> names;           // Owns record field names.
     std::string identity;                     // Owns nominal record identity.
     std::optional<value_type> element;        // Retains array/range element identity.
@@ -48,16 +49,40 @@ struct type_plan {
     std::shared_ptr<const type_plan> release_next; // Links only dying, uniquely owned plans.
 };
 
-/// A hash function for immutable metadata identity pairs.
-struct plan_pair_hash {
-    /// Combines pointer identities for immutable plan-pair lookup.
-    std::size_t operator()(
-        const std::pair<const type_plan*, const type_plan*>& pair) const noexcept {
-        const auto a = std::hash<const type_plan*>{}(pair.first);
-        const auto b = std::hash<const type_plan*>{}(pair.second);
-        return a ^ (b + std::size_t{0x9e3779b9} + (a << 6U) + (a >> 2U));
+/// Compiles reusable carrier ranges from complete canonical fields.
+///
+/// \pre plan is unpublished and its fields and offsets agree.
+/// Complexity: O(field count) time and added range metadata; descendants are not expanded.
+void compile_ownership(type_plan& plan) {
+    plan.ownership.clear();
+    std::size_t largest = 0;
+    std::size_t largest_count = 0;
+    // Borrow normalized child ranges instead of copying their transitive slot sequences.
+    for (std::size_t i = 0; i != plan.fields.size(); ++i) {
+        const auto& field = plan.fields[i];
+        const auto count = type_access::resources(field);
+        if (count == 0) continue;
+        ownership_slot range{&field, plan.offsets[i]};
+        const auto children = type_access::ownership_ranges(field);
+        if (children.size() == 1) {
+            range.type = children.front().type;
+            range.offset += children.front().offset;
+        }
+        if (count > largest_count) {
+            largest = plan.ownership.size();
+            largest_count = count;
+        }
+        plan.ownership.push_back(range);
     }
-};
+    if (!plan.ownership.empty()) std::swap(plan.ownership[largest], plan.ownership.back());
+}
+
+std::size_t plan_pair_hash::operator()(
+    const std::pair<const type_plan*, const type_plan*>& pair) const noexcept {
+    const auto a = std::hash<const type_plan*>{}(pair.first);
+    const auto b = std::hash<const type_plan*>{}(pair.second);
+    return a ^ (b + std::size_t{0x9e3779b9} + (a << 6U) + (a >> 2U));
+}
 
 value_type type_access::install_callable_ownership(const value_type& signature,
                                                    opaque_ownership operations) {
@@ -137,6 +162,7 @@ value_type type_access::bind_runtime_ownership(const value_type& type, opaque_ow
                 plan->owns =
                     std::all_of(plan->fields.begin(), plan->fields.end(),
                                 [](const value_type& field) { return field.owns_values(); });
+                compile_ownership(*plan);
             }
             bound.emplace(source, value_type(std::move(plan)));
         }
@@ -157,15 +183,29 @@ bool type_access::compatible_operations(const value_type& expected, const value_
 bool type_access::compare_plans(const value_type& expected,
                                 const value_type& actual,
                                 bool semantic) {
+    compatibility_context context;
+    return compare_plans(expected, actual, semantic, context);
+}
+
+bool type_access::compare_plans(const value_type& expected,
+                                const value_type& actual,
+                                bool semantic,
+                                compatibility_context& context) {
     using pair = std::pair<const type_plan*, const type_plan*>;
     if (expected._plan == actual._plan) return true;
+    auto& successful = semantic ? context._semantic : context._operations;
+    const pair roots{expected._plan.get(), actual._plan.get()};
+    if (successful.contains(roots)) return true;
+    context._retained.push_back(expected);
+    context._retained.push_back(actual);
     std::vector<pair> pending{{expected._plan.get(), actual._plan.get()}};
     std::unordered_set<pair, plan_pair_hash> visited;
     // Visit each distinct immutable plan pair once, including shared DAG edges.
     while (!pending.empty()) {
         const auto [a, b] = pending.back();
         pending.pop_back();
-        if (a == b || !visited.insert({a, b}).second) continue;
+        if (a == b || successful.contains({a, b}) || !visited.insert({a, b}).second) continue;
+        ++context._compared;
         if (a->kind != b->kind) return false;
         if (semantic) {
             if (a->bytes.size != b->bytes.size || a->bytes.alignment != b->bytes.alignment ||
@@ -190,6 +230,7 @@ bool type_access::compare_plans(const value_type& expected,
         for (std::size_t i = 0; i != a->fields.size(); ++i)
             pending.emplace_back(a->fields[i]._plan.get(), b->fields[i]._plan.get());
     }
+    successful.merge(visited);
     return true;
 }
 
@@ -200,38 +241,54 @@ bool type_access::parameter_allowed(const value_type& type) noexcept {
     return type._plan->parameter;
 }
 
-ownership_slot type_access::resource(const value_type& type, std::size_t ordinal) noexcept {
-    assert(ordinal < resources(type));
-    const value_type* current = &type;
-    std::size_t offset = 0;
-    // Cumulative carrier counts select one source-order path without a traversal stack.
-    while (current->kind() == type_kind::tuple || current->kind() == type_kind::record) {
-        const auto& plan = *current->_plan;
-        const auto found =
-            std::upper_bound(plan.resource_ends.begin(), plan.resource_ends.end(), ordinal);
-        const auto i = static_cast<std::size_t>(found - plan.resource_ends.begin());
-        assert(i < plan.fields.size());
-        if (i == plan.fields.size()) std::terminate();
-        if (i != 0) ordinal -= plan.resource_ends[i - 1];
-        offset += plan.offsets[i];
-        current = &plan.fields[i];
+std::span<const ownership_slot> type_access::ownership_ranges(const value_type& type) noexcept {
+    return type._plan->ownership;
+}
+
+ownership_cursor::ownership_cursor(const value_type& type) noexcept {
+    if (type_access::resources(type) == 0) return;
+    const auto ranges = type_access::ownership_ranges(type);
+    const auto root = ranges.size() == 1 ? ranges.front() : ownership_slot{&type, 0};
+    _pending[_size++] = {root.type, root.offset};
+}
+
+std::optional<ownership_slot> ownership_cursor::next() noexcept {
+    assert(!empty());
+    auto& current = _pending[_size - 1];
+    const auto ranges = type_access::ownership_ranges(*current.type);
+    if (ranges.empty()) {
+        const ownership_slot slot{current.type, current.offset};
+        --_size;
+        return slot;
     }
-    assert(current->kind() == type_kind::array || current->kind() == type_kind::callable);
-    return {current, offset};
+    const auto range = ranges[current.next++];
+    const auto offset = current.offset + range.offset;
+    if (current.next == ranges.size()) --_size;
+    assert(_size < _pending.size());
+    _pending[_size++] = {range.type, offset};
+    return std::nullopt;
 }
 
 void require_compatible(const value_type& expected, const value_type& actual) {
-    if (!expected.compatible_with(actual))
+    compatibility_context context;
+    context.require(expected, actual);
+}
+
+std::size_t compatibility_context::require(const value_type& expected, const value_type& actual) {
+    const auto before = _compared;
+    if (!type_access::compare_plans(expected, actual, true, *this) ||
+        !type_access::compare_plans(expected, actual, false, *this))
         throw std::invalid_argument("incompatible value shape or opaque ownership operations");
+    return _compared - before;
 }
 
 /// Extends a plan's canonical layout and complete aggregate capabilities with source-order fields.
 ///
-/// \pre plan has a valid canonical prefix, including matching cumulative resource counts.
+/// \pre plan has a valid canonical prefix.
 /// Throws std::overflow_error if byte extent arithmetic overflows.
 /// Also throws std::overflow_error if the ownership-carrier count overflows.
 /// Failure may leave a partially extended unpublished plan.
-/// Complexity: O(field count) amortized time and added offset/count result storage.
+/// Complexity: O(field count) amortized time and added offset result storage.
 void canonical_layout(type_plan& plan, std::span<const value_type> fields) {
     // Accumulate source-order layouts and retain canonical field offsets.
     for (const auto& field : fields) {
@@ -248,7 +305,6 @@ void canonical_layout(type_plan& plan, std::span<const value_type> fields) {
         if (count > std::numeric_limits<std::size_t>::max() - plan.resources)
             throw std::overflow_error("aggregate ownership count overflow");
         plan.resources += count;
-        plan.resource_ends.push_back(plan.resources);
     }
     plan.bytes.size = align_offset(plan.bytes.size, plan.bytes.alignment);
 }
@@ -324,6 +380,7 @@ value_type value_type::tuple(std::span<const value_type> fields) {
     auto plan = std::make_shared<detail::type_plan>();
     plan->fields.assign(fields.begin(), fields.end());
     detail::canonical_layout(*plan, fields);
+    detail::compile_ownership(*plan);
     return value_type(std::move(plan));
 }
 
@@ -341,6 +398,7 @@ value_type value_type::record(std::string_view identity, std::span<const record_
         plan->fields.push_back(field.type);
     }
     detail::canonical_layout(*plan, plan->fields);
+    detail::compile_ownership(*plan);
     return value_type(std::move(plan));
 }
 
@@ -392,7 +450,9 @@ bool value_type::same_shape(const value_type& other) const {
 }
 
 bool value_type::compatible_with(const value_type& other) const {
-    return same_shape(other) && detail::type_access::compatible_operations(*this, other);
+    detail::compatibility_context context;
+    return detail::type_access::compare_plans(*this, other, true, context) &&
+           detail::type_access::compare_plans(*this, other, false, context);
 }
 
 type_kind value_type::kind() const noexcept { return _plan->kind; }
