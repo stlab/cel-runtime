@@ -79,6 +79,11 @@ public:
 ///
 /// These operations do not implement callable execution or concrete closure bodies.
 struct type_access {
+    /// Releases a descriptor reference into an enclosing retirement operation.
+    ///
+    /// \pre type will only be destroyed after this call.
+    /// A last-owned plan remains queue-owned until disposal; shared plans may retire elsewhere.
+    static void retire(value_type& type, retirement_queue& queue) noexcept;
     /// Reports shared complete immutable metadata identity without traversing the shape.
     static bool same_plan(const value_type& a, const value_type& b) noexcept {
         return a._plan == b._plan;

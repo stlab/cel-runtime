@@ -8,9 +8,162 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <latch>
 #include <limits>
+#include <memory>
 #include <stdexcept>
+#include <thread>
 #include <vector>
+
+/// Runs two nonthrowing callbacks on separate threads behind one start gate and joins them.
+///
+/// Thread-start failures propagate after releasing any already started worker.
+/// Complexity: callback work plus thread startup and joining; O(1) auxiliary space.
+template <class First, class Second>
+void run_concurrently(First first, Second second) {
+    std::latch start{1};
+    std::array<std::jthread, 2> threads;
+    const auto release = [](std::latch* gate) noexcept { gate->count_down(); };
+    const std::unique_ptr<std::latch, decltype(release)> release_on_exit(&start, release);
+    threads[0] = std::jthread([&] {
+        start.wait();
+        first();
+    });
+    threads[1] = std::jthread([&] {
+        start.wait();
+        second();
+    });
+}
+
+/// Records actual node disposal and reentrant callbacks across independent retirement queues.
+struct retirement_counts {
+    std::atomic<std::size_t> disposed{0}; ///< Counts destroyed nodes.
+    std::atomic<bool> nested{false};      ///< Records nesting within one thread.
+};
+
+/// An owned chain node for checking the retirement primitive used by type metadata.
+struct retirement_probe : cel::detail::retirement_node {
+    retirement_counts& counts; ///< Borrows counters until every worker has joined.
+    cel::detail::retirement_ptr<retirement_probe> child; ///< Retains the next chain node.
+    static inline thread_local std::size_t depth = 0; ///< Counts active callbacks on this thread.
+
+    /// Adopts one child edge and retains the disposal counters.
+    retirement_probe(retirement_counts& state, cel::detail::retirement_ptr<retirement_probe> next) :
+        retirement_node(dispose_node), counts(state), child(std::move(next)) {}
+
+    /// Records disposal, detaches the child into queue, and deletes this node.
+    ///
+    /// \pre base is an exclusively retiring retirement_probe.
+    static void dispose_node(cel::detail::retirement_node& base,
+                             cel::detail::retirement_queue& queue) noexcept {
+        auto& node = static_cast<retirement_probe&>(base);
+        ++depth;
+        if (depth != 1) node.counts.nested.store(true, std::memory_order_relaxed);
+        node.child.retire(queue);
+        node.counts.disposed.fetch_add(1, std::memory_order_relaxed);
+        delete &node;
+        --depth;
+    }
+};
+
+/// Catches premature disposal or wrong last-owner selection during concurrent edge releases.
+TEST_CASE("concurrent last owners retire each node once without nested callbacks") {
+    constexpr std::size_t count = 12000;
+    retirement_counts counts;
+    cel::detail::retirement_ptr<retirement_probe> root;
+    CHECK(root.get() == nullptr);
+    std::vector<cel::detail::retirement_ptr<retirement_probe>> aliases;
+    // Retain interior aliases so independent queues also compete below the root.
+    for (std::size_t i = 0; i != count; ++i) {
+        auto next = std::make_unique<retirement_probe>(counts, std::move(root));
+        root = cel::detail::retirement_ptr<retirement_probe>(next.release());
+        if (i % 2 == 0) aliases.push_back(root);
+    }
+    {
+        auto copy = root;
+        CHECK(copy == root);
+        CHECK(copy.get() == root.get());
+        auto moved = std::move(copy);
+        // NOLINTNEXTLINE(bugprone-use-after-move): moves promise an empty source handle.
+        CHECK_FALSE(copy);
+        CHECK(moved == root);
+    }
+    CHECK(counts.disposed.load() == 0);
+    run_concurrently([owner = std::move(root)]() mutable { owner = {}; },
+                     [owners = std::move(aliases)]() mutable {
+                         while (!owners.empty())
+                             owners.pop_back();
+                     });
+    CHECK(counts.disposed.load() == count);
+    CHECK_FALSE(counts.nested.load());
+}
+
+/// Catches disposing metadata before its last-owner queue drains.
+TEST_CASE("queued metadata retains borrowed views until disposal") {
+    const auto boolean = cel::value_type::leaf<bool>();
+    auto type = cel::value_type::record(
+        "queued", std::array{cel::record_field{"items", cel::value_type::array(boolean)},
+                             cel::record_field{"code", cel::value_type::callable(
+                                                           std::array{boolean},
+                                                           cel::value_type::leaf<double>())}});
+    const auto fields = type.fields();
+    const auto names = type.field_names();
+    const auto identity = type.record_identity();
+    const auto& element = fields[0].element();
+    const auto parameters = fields[1].parameters();
+    const auto& result = fields[1].result();
+    cel::detail::retirement_queue queue;
+    cel::detail::type_access::retire(type, queue);
+    CHECK(identity == "queued");
+    CHECK(names[0] == "items");
+    CHECK(names[1] == "code");
+    CHECK(element.same_shape(boolean));
+    CHECK(parameters[0].same_shape(boolean));
+    CHECK(result.same_shape(cel::value_type::leaf<double>()));
+}
+
+/// Adds an array, shared aggregate, or callable-result edge.
+///
+/// Complexity: O(1) time and new metadata space.
+cel::value_type extend_metadata(const cel::value_type& child, std::size_t level) {
+    switch (level % 4) {
+        case 0:
+            return cel::value_type::array(child);
+        case 1:
+            return cel::value_type::tuple(std::array{child, child});
+        case 2:
+            return cel::value_type::record("shared", std::array{cel::record_field{"left", child},
+                                                                cel::record_field{"right", child}});
+        default:
+            return cel::value_type::callable({}, child);
+    }
+}
+
+/// Catches invalidating retained metadata during concurrent root and interior-alias release.
+TEST_CASE("concurrent metadata release preserves retained shared descendants") {
+    constexpr std::size_t depth = 12000;
+    auto type = cel::value_type::leaf<bool>();
+    auto expected = cel::value_type::leaf<bool>();
+    std::vector<cel::value_type> aliases;
+    // Construct a second, independent shape for the descendant that survives retirement.
+    for (std::size_t i = 0; i != depth / 2; ++i)
+        expected = extend_metadata(expected, i);
+    for (std::size_t i = 0; i != depth; ++i) {
+        type = extend_metadata(type, i);
+        aliases.push_back(type);
+    }
+    const auto survivor = aliases[depth / 2 - 1];
+    std::vector<cel::value_type> roots{type};
+    type = cel::value_type{};
+    run_concurrently([owners = std::move(roots)]() mutable { owners.clear(); },
+                     [owners = std::move(aliases)]() mutable {
+                         while (!owners.empty())
+                             owners.pop_back();
+                     });
+    CHECK(survivor.same_shape(expected));
+    CHECK(survivor.result().kind() == cel::type_kind::record);
+}
 
 /// Checks every carrier offset and a linear bound on constant-time traversal steps.
 /// Complexity: O(count log count) time and O(count) temporary space.
