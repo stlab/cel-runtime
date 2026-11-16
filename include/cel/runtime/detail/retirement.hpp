@@ -39,7 +39,7 @@ struct retirement_node {
 /// constant stack space, including during exception unwinding.
 class retirement_queue {
     // [knowledge] Reuse dying nodes' links as the worklist; never allocate a traversal
-    // container or recursively destroy runtime-owned executable edges.
+    // container or recursively destroy runtime-owned child edges.
     /// Owns nodes awaiting disposal.
     retirement_node* _pending = nullptr;
 
@@ -120,6 +120,7 @@ public:
     /// Self-copy preserves ownership; the incoming node stays alive while prior ownership retires.
     ///
     /// Complexity: prior ownership retirement costs.
+    // NOLINTNEXTLINE(bugprone-unhandled-self-assignment): copy-and-swap is self-copy safe.
     retirement_ptr& operator=(const retirement_ptr& other) noexcept {
         retirement_ptr next(other);
         swap(next);
@@ -145,6 +146,12 @@ public:
     void retire(retirement_queue& queue) noexcept { queue.release(std::exchange(_node, nullptr)); }
     /// Reports whether this handle owns a node.
     explicit operator bool() const noexcept { return _node != nullptr; }
+    /// Borrows the retained node, or returns null for an empty handle.
+    ///
+    /// A retained owner must keep the node alive throughout every use of the pointer.
+    T* get() const noexcept { return static_cast<T*>(_node); }
+    /// Compares retained node identities, including empty handles.
+    friend bool operator==(const retirement_ptr&, const retirement_ptr&) noexcept = default;
     /// Borrows the retained concrete node.
     ///
     /// \pre This handle owns a node.
@@ -152,7 +159,7 @@ public:
     /// throughout every use.
     T* operator->() const noexcept {
         assert(_node);
-        return static_cast<T*>(_node);
+        return get();
     }
 };
 } // namespace cel::detail

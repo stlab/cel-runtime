@@ -2,6 +2,7 @@
 #ifndef CEL_RUNTIME_VALUE_TYPE_HPP
 #define CEL_RUNTIME_VALUE_TYPE_HPP
 
+#include <cel/runtime/detail/retirement.hpp>
 #include <cel/runtime/layout.hpp>
 
 #include <memory>
@@ -63,23 +64,18 @@ struct type_access;
 /// Example: `auto numbers = value_type::array(value_type::leaf<double>()); auto copy = numbers;`.
 class value_type {
     friend struct detail::type_access;
-    std::shared_ptr<const detail::type_plan> _plan;
+    detail::retirement_ptr<const detail::type_plan> _plan;
 
     /// Retains complete immutable construction metadata.
     ///
     /// \pre The plan is complete and no mutable alias can change it after publication.
-    explicit value_type(std::shared_ptr<const detail::type_plan> plan);
+    explicit value_type(std::unique_ptr<detail::type_plan> plan);
     /// Registers a trusted concrete leaf with a checked layout.
     ///
     /// \pre Identity and layout describe the same trivially copyable concrete type.
     /// Throws std::invalid_argument for invalid alignment and std::overflow_error for
     /// alignment rounding overflow.
     static value_type make_leaf(std::type_index identity, layout bytes);
-    /// Releases this reference and uniquely owned metadata without recursion or allocation.
-    ///
-    /// Complexity: O(V + E + S) time and O(1) auxiliary space, for released plans V,
-    /// their descriptor edges E, and stored name bytes S.
-    static void release_plan(std::shared_ptr<const detail::type_plan>& plan) noexcept;
 
 public:
     /// Creates the empty tuple descriptor (source unit).

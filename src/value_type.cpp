@@ -26,11 +26,12 @@ void require_ownership(const value_type& type) {
 }
 
 /// Immutable complete semantic metadata after publication.
-struct type_plan {
+struct type_plan : retirement_node {
     // [knowledge] Fields and offsets are canonical and category-appropriate. ownership
     // borrows retained descendants, collapses unary paths, and puts a largest range last.
     // Rebuild these borrowed ranges whenever copied fields are rebound.
-    // Only dying, uniquely owned plans may use release_next or otherwise mutate published data.
+    // Keep published fields immutable. Detach every child into the last-owner queue before
+    // deletion.
     type_kind kind = type_kind::tuple;        // Identifies the shape.
     layout bytes{0, 1};                       // Describes its canonical representation.
     bool owns = true;                         // Records complete ownership capabilities.
@@ -46,8 +47,38 @@ struct type_plan {
     std::optional<value_type> result;         // Retains a complete callable result.
     range_kind form = range_kind::range_full; // Retains source range form.
     opaque_ownership operations; // Retains trusted callable clone/destruction operations.
-    std::shared_ptr<const type_plan> release_next; // Links only dying, uniquely owned plans.
+
+    /// Creates unpublished metadata with one initial ownership reference.
+    type_plan() : retirement_node(dispose_plan) {}
+
+    /// Copies immutable metadata into a fresh ownership node.
+    ///
+    /// Complexity: linear in immediate metadata and copied name bytes; new metadata storage.
+    type_plan(const type_plan& other) :
+        retirement_node(dispose_plan), kind(other.kind), bytes(other.bytes), owns(other.owns),
+        parameter(other.parameter), resources(other.resources), leaf(other.leaf),
+        fields(other.fields), offsets(other.offsets), ownership(other.ownership),
+        names(other.names), identity(other.identity), element(other.element), result(other.result),
+        form(other.form), operations(other.operations) {}
+
+    /// Detaches all descriptor edges into queue and deletes the last-owned plan.
+    ///
+    /// \pre base is an exclusively retiring type_plan.
+    /// Complexity: linear in immediate fields and stored names; O(1) auxiliary space.
+    static void dispose_plan(retirement_node& base, retirement_queue& queue) noexcept {
+        auto& plan = static_cast<type_plan&>(base);
+        if (plan.element) type_access::retire(*plan.element, queue);
+        if (plan.result) type_access::retire(*plan.result, queue);
+        // Clear all owning fields before their containing storage is released.
+        for (auto& field : plan.fields)
+            type_access::retire(field, queue);
+        delete &plan;
+    }
 };
+
+void type_access::retire(value_type& type, retirement_queue& queue) noexcept {
+    type._plan.retire(queue);
+}
 
 /// Compiles reusable carrier ranges from complete canonical fields.
 ///
@@ -88,7 +119,7 @@ value_type type_access::install_callable_ownership(const value_type& signature,
                                                    opaque_ownership operations) {
     if (signature.kind() != type_kind::callable || !operations.clone || !operations.destroy)
         throw std::invalid_argument("callable ownership requires both operations");
-    auto plan = std::make_shared<type_plan>(*signature._plan);
+    auto plan = std::make_unique<type_plan>(*signature._plan.get());
     plan->operations = operations;
     plan->owns = true;
     return value_type(std::move(plan));
@@ -147,7 +178,7 @@ value_type type_access::bind_runtime_ownership(const value_type& type, opaque_ow
         if (!changed) {
             bound.emplace(source, *current.type);
         } else {
-            auto plan = std::make_shared<type_plan>(*source);
+            auto plan = std::make_unique<type_plan>(*source);
             std::transform(source->fields.begin(), source->fields.end(), plan->fields.begin(),
                            transformed);
             if (source->element) plan->element = transformed(*source->element);
@@ -316,48 +347,18 @@ bool parameter_allowed(const value_type& type) { return type_access::parameter_a
 
 namespace cel {
 
-value_type::value_type(std::shared_ptr<const detail::type_plan> plan) : _plan(std::move(plan)) {}
+value_type::value_type(std::unique_ptr<detail::type_plan> plan) : _plan(plan.release()) {}
 value_type::value_type() : value_type(tuple({})) {}
 
-void value_type::release_plan(std::shared_ptr<const detail::type_plan>& root) noexcept {
-    auto pending = std::move(root);
-    // Move dying descendants into their own worklist links before deleting any parent.
-    while (pending) {
-        auto current = std::move(pending);
-        if (current.use_count() != 1) {
-            current.reset();
-            continue;
-        }
-        auto& plan = *const_cast<detail::type_plan*>(current.get());
-        pending = std::move(plan.release_next);
-        const auto detach = [&](value_type& child) {
-            auto next = std::move(child._plan);
-            if (next && next.use_count() == 1) {
-                auto& node = *const_cast<detail::type_plan*>(next.get());
-                node.release_next = std::move(pending);
-                pending = std::move(next);
-            }
-        };
-        if (plan.element) detach(*plan.element);
-        if (plan.result) detach(*plan.result);
-        for (auto& field : plan.fields)
-            detach(field);
-        current.reset();
-    }
-}
-value_type::~value_type() { release_plan(_plan); }
+value_type::~value_type() = default;
 value_type& value_type::operator=(const value_type& other) noexcept {
-    if (this != &other) {
-        auto next = other._plan;
-        release_plan(_plan);
-        _plan = std::move(next);
-    }
+    _plan = other._plan;
     return *this;
 }
 
 value_type value_type::make_leaf(std::type_index identity, layout bytes) {
     (void)detail::align_offset(bytes.size, bytes.alignment);
-    auto plan = std::make_shared<detail::type_plan>();
+    auto plan = std::make_unique<detail::type_plan>();
     plan->kind = type_kind::leaf;
     plan->bytes = bytes;
     plan->leaf = identity;
@@ -366,7 +367,7 @@ value_type value_type::make_leaf(std::type_index identity, layout bytes) {
 }
 
 value_type value_type::array(value_type element) {
-    auto plan = std::make_shared<detail::type_plan>();
+    auto plan = std::make_unique<detail::type_plan>();
     plan->kind = type_kind::array;
     plan->bytes = {sizeof(void*), alignof(void*)};
     plan->owns = element.owns_values();
@@ -377,7 +378,7 @@ value_type value_type::array(value_type element) {
 }
 
 value_type value_type::tuple(std::span<const value_type> fields) {
-    auto plan = std::make_shared<detail::type_plan>();
+    auto plan = std::make_unique<detail::type_plan>();
     plan->fields.assign(fields.begin(), fields.end());
     detail::canonical_layout(*plan, fields);
     detail::compile_ownership(*plan);
@@ -386,7 +387,7 @@ value_type value_type::tuple(std::span<const value_type> fields) {
 
 value_type value_type::record(std::string_view identity, std::span<const record_field> fields) {
     if (identity.empty()) throw std::invalid_argument("record identity is empty");
-    auto plan = std::make_shared<detail::type_plan>();
+    auto plan = std::make_unique<detail::type_plan>();
     plan->kind = type_kind::record;
     plan->identity = identity;
     std::unordered_set<std::string_view> names;
@@ -421,7 +422,7 @@ value_type value_type::range(range_kind form, value_type endpoint) {
         default:
             throw std::invalid_argument("invalid range form");
     }
-    auto plan = std::make_shared<detail::type_plan>();
+    auto plan = std::make_unique<detail::type_plan>();
     plan->kind = type_kind::range;
     plan->form = form;
     plan->element = endpoint;
@@ -434,7 +435,7 @@ value_type value_type::range(range_kind form, value_type endpoint) {
 value_type value_type::callable(std::span<const value_type> parameters, value_type result) {
     if (!std::all_of(parameters.begin(), parameters.end(), detail::parameter_allowed))
         throw std::invalid_argument("callable parameters require built-in composite values");
-    auto plan = std::make_shared<detail::type_plan>();
+    auto plan = std::make_unique<detail::type_plan>();
     plan->kind = type_kind::callable;
     plan->bytes = {sizeof(void*), alignof(void*)};
     plan->owns = false;
