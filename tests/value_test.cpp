@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BSL-1.0
+#include "canonical.hpp"
 #include "storage.hpp"
 #include "type_ops.hpp"
 #include "value_ops.hpp"
@@ -14,6 +15,14 @@
 #include <string>
 #include <tuple>
 #include <vector>
+
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#include <sanitizer/asan_interface.h>
+#endif
+#elif defined(__SANITIZE_ADDRESS__)
+#include <sanitizer/asan_interface.h>
+#endif
 
 /// Exercises concrete identity independently of layout.
 struct alignas(256) aligned_leaf {
@@ -584,21 +593,125 @@ struct raw_owner {
     cel::value_type type;       ///< Retains immutable destruction metadata.
     cel::detail::storage bytes; ///< Owns aligned outer storage.
     bool initialized = false;   ///< Tracks whether payload destruction is required.
-    /// Copies a public value into raw canonical storage.
-    /// Complexity: O(payload size) time and space.
-    explicit raw_owner(const cel::value& source) : type(source.type()) {
+    /// Clones a canonical payload with clone_payload's source requirements.
+    ///
+    /// Complexity: linear in source value area, plus held clone costs; new owned storage.
+    raw_owner(const cel::value_type& shape, const std::byte* source) : type(shape) {
         const auto layout = type.byte_layout();
         bytes.reserve(layout.size, layout.alignment);
         bytes.resize(layout.size);
-        cel::detail::clone_payload(type, cel::detail::value_access::data(source), bytes.data());
+        cel::detail::clone_payload(type, source, bytes.data());
         initialized = true;
     }
+    /// Copies a public value into raw canonical storage.
+    /// Complexity: O(payload size) time and space.
+    explicit raw_owner(const cel::value& source) :
+        raw_owner(source.type(), cel::detail::value_access::data(source)) {}
     /// Destroys exactly one raw payload without allocating.
     /// Complexity: O(payload size) time and O(shape depth) call space.
     ~raw_owner() {
         if (initialized) cel::detail::destroy_payload(type, bytes.data());
     }
 };
+
+/// Catches reading a fixed aggregate before checking its deferred callable carriers.
+TEST_CASE("deferred callable cloning rejects fixed aggregates before reading source") {
+    const auto deferred = cel::value_type::callable({}, cel::value_type::leaf<double>());
+    const auto tuple = cel::value_type::tuple(std::array{cel::value_type::leaf<bool>(), deferred});
+    const auto record =
+        cel::value_type::record("callbacks", std::array{cel::record_field{"nested", tuple}});
+    CHECK_THROWS_AS(raw_owner(tuple, nullptr), std::invalid_argument);
+    CHECK_THROWS_AS(raw_owner(record, nullptr), std::invalid_argument);
+}
+
+/// Catches copying packed element bytes before rejecting their deferred callable descriptor.
+TEST_CASE("deferred callable cloning rejects array elements before reading their bytes") {
+    const auto deferred = cel::value_type::callable({}, cel::value_type::leaf<double>());
+    const auto installed = cel::detail::type_access::install_callable_ownership(
+        deferred, {clone_test_owner, destroy_test_owner});
+    int number = 42;
+    int* pointer = &number;
+    std::array<std::byte, sizeof(pointer)> carrier;
+    std::memcpy(carrier.data(), static_cast<const void*>(&pointer), sizeof(pointer));
+    cel::detail::canonical_owner source(cel::value_type::array(installed));
+    cel::detail::array_builder builder(installed, 1);
+    auto* element = builder.destination();
+    cel::detail::clone_payload(installed, carrier.data(), element);
+    builder.initialized();
+    builder.release_to(source.bytes.data());
+    source.live = true;
+    const auto live = live_test_owners;
+
+#ifdef ASAN_POISON_MEMORY_REGION
+    ASAN_POISON_MEMORY_REGION(element, installed.byte_layout().size);
+    // Restore readability before source destruction, including on an unexpected exception.
+    const auto unpoison = [size = installed.byte_layout().size](std::byte* data) noexcept {
+        ASAN_UNPOISON_MEMORY_REGION(data, size);
+    };
+    const std::unique_ptr<std::byte, decltype(unpoison)> readable_on_exit(element, unpoison);
+#endif
+
+    CHECK_THROWS_AS(raw_owner(cel::value_type::array(deferred), source.bytes.data()),
+                    std::invalid_argument);
+    CHECK(live_test_owners == live);
+}
+
+/// Catches replacing a requested deferred descriptor with installed source-owner metadata.
+TEST_CASE("deferred callable cloning rejects fixed aggregates inside nested arrays") {
+    const auto deferred = cel::value_type::callable({}, cel::value_type::leaf<double>());
+    const auto installed = cel::detail::type_access::install_callable_ownership(
+        deferred, {clone_test_owner, destroy_test_owner});
+    int number = 42;
+    int* pointer = &number;
+    std::array<std::byte, sizeof(pointer)> carrier;
+    std::memcpy(carrier.data(), static_cast<const void*>(&pointer), sizeof(pointer));
+    const auto callable = cel::detail::value_access::copy(installed, carrier.data());
+    auto source = cel::value::tuple(std::array{cel::value::from(true), callable});
+    auto requested = cel::value_type::tuple(std::array{cel::value_type::leaf<bool>(), deferred});
+    for (int depth = 0; depth != 3; ++depth) {
+        source = cel::value::array(source.type(), std::array{source});
+        requested = cel::value_type::array(requested);
+        const auto live = live_test_owners;
+        CHECK_THROWS_AS(raw_owner(requested, cel::detail::value_access::data(source)),
+                        std::invalid_argument);
+        CHECK(live_test_owners == live);
+    }
+}
+
+/// Catches retaining an earlier sibling clone after a nested deferred-callable rejection.
+TEST_CASE("deferred callable cloning releases the initialized sibling prefix") {
+    const auto deferred = cel::value_type::callable({}, cel::value_type::leaf<double>());
+    const auto installed = cel::detail::type_access::install_callable_ownership(
+        deferred, {clone_test_owner, destroy_test_owner});
+    int number = 42;
+    int* pointer = &number;
+    std::array<std::byte, sizeof(pointer)> carrier;
+    std::memcpy(carrier.data(), static_cast<const void*>(&pointer), sizeof(pointer));
+    const auto callable = cel::detail::value_access::copy(installed, carrier.data());
+    const auto array = cel::value::array(installed, std::array{callable});
+    const auto source = cel::value::tuple(std::array{callable, array});
+    const auto requested =
+        cel::value_type::tuple(std::array{installed, cel::value_type::array(deferred)});
+    const auto live = live_test_owners;
+    CHECK_THROWS_AS(raw_owner(requested, cel::detail::value_access::data(source)),
+                    std::invalid_argument);
+    CHECK(live_test_owners == live);
+    CHECK(source.at(1).size() == 1);
+}
+
+/// Catches rejecting uninhabited deferred element types, including beneath a nonempty array.
+TEST_CASE("deferred callable cloning preserves empty and nested empty arrays") {
+    const auto deferred = cel::value_type::callable({}, cel::value_type::leaf<double>());
+    const auto empty = cel::value::array(deferred, {});
+    raw_owner empty_copy(empty);
+    CHECK(cel::detail::value_access::array_size(empty_copy.bytes.data()) == 0);
+    const auto nested = cel::value::array(empty.type(), std::array{empty});
+    raw_owner nested_copy(nested);
+    const auto result = cel::detail::value_access::copy(nested_copy.type, nested_copy.bytes.data());
+    CHECK(result.size() == 1);
+    CHECK(result.at(0).size() == 0);
+    CHECK(result.type().element().element().kind() == cel::type_kind::callable);
+}
 
 /// Catches raw clones sharing mutable arrays and duplicate destruction after byte transfer.
 TEST_CASE("private canonical clone destruction and transfer preserve exactly one owner") {

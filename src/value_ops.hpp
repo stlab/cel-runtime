@@ -56,12 +56,12 @@ public:
 /// \pre destination is an uninitialized, suitably aligned writable extent of type.
 /// \pre Except for the promised deferred-callable rejection, source is a disjoint readable
 /// initialized canonical extent with valid owned descendants, unchanged throughout cloning.
+/// Traversed array structure is valid and readable even when callable representations are not.
 /// Copies mutable aggregates independently; explicit callable code retains reference semantics.
 ///
-/// Throws std::invalid_argument if callable ownership has not been installed.
-/// A deferred callable is rejected before source bytes are read.
-/// TODO(verify): This established before-read guarantee lacks evidence for callables
-/// nested inside arrays; the broader rejection case needs resolution.
+/// Throws std::invalid_argument for a callable value without installed ownership.
+/// Rejects that callable before reading its representation; array structure may be read.
+/// Empty arrays do not require installed ownership for their element types.
 /// Failure destroys every constructed child; destination remains uninitialized.
 ///
 /// Complexity: linear in source value area, plus held clone/destruction costs;

@@ -175,10 +175,26 @@ array_owner::~array_owner() {
     drain_arrays(pending, queue);
 }
 
+/// Validates cloning support for callable carriers outside arrays.
+///
+/// Throws std::invalid_argument if a direct callable lacks installed clone operations.
+/// Complexity: linear in direct ownership carriers; O(1) auxiliary space.
+void require_clone_operations(const value_type& type) {
+    ownership_cursor cursor(type);
+    // Check direct carriers without descending into possibly empty arrays.
+    while (!cursor.empty()) {
+        const auto slot = cursor.next();
+        if (slot && slot->type->kind() == type_kind::callable &&
+            !type_access::operations(*slot->type).clone)
+            throw std::invalid_argument("callable ownership is not installed");
+    }
+}
+
 /// Extends independently cloned carrier ownership through a fixed canonical extent.
 ///
-/// \pre source is a readable valid owner of type, unchanged during cloning; destination
-/// is disjoint aligned writable storage with exactly completed valid cloned carriers.
+/// \pre Direct callable carriers have clone operations; source meets clone_payload's
+/// requirements. destination is disjoint aligned writable storage with exactly completed
+/// valid cloned carriers.
 /// completed <= type_access::resources(type); pending retains uniquely owned partial clones.
 /// On success completed counts all direct carriers and pending retains descendants still
 /// needing cloning. Failure preserves a discardable prefix counted by completed.
@@ -201,7 +217,9 @@ void clone_resources(const value_type& type,
         if (slot->type->kind() == type_kind::array) {
             const auto* original = read_array(input).owner;
             assert(original->initialized == original->count && original->partial_resources == 0);
-            auto copy = std::make_unique<array_owner>(original->element, original->count);
+            const auto& element = slot->type->element();
+            if (original->count != 0) require_clone_operations(element);
+            auto copy = std::make_unique<array_owner>(element, original->count);
             if (copy->bytes.size() != 0)
                 std::memcpy(copy->bytes.data(), original->bytes.data(), copy->bytes.size());
             copy->clone_source = original;
@@ -220,14 +238,7 @@ void clone_resources(const value_type& type,
 }
 
 void clone_payload(const value_type& type, const std::byte* source, std::byte* destination) {
-    // Reject deferred direct carriers before reading any source representation.
-    ownership_cursor cursor(type);
-    while (!cursor.empty()) {
-        const auto slot = cursor.next();
-        if (slot && slot->type->kind() == type_kind::callable &&
-            !type_access::operations(*slot->type).clone)
-            throw std::invalid_argument("callable ownership is not installed");
-    }
+    require_clone_operations(type);
     const auto extent = type.byte_layout().size;
     if (extent != 0) std::memcpy(destination, source, extent);
     array_owner* pending = nullptr;
