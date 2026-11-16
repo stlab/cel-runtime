@@ -120,6 +120,7 @@ public:
     /// Self-copy preserves ownership; the incoming node stays alive while prior ownership retires.
     ///
     /// Complexity: prior ownership retirement costs.
+    // NOLINTNEXTLINE(bugprone-unhandled-self-assignment): copy-and-swap is self-copy safe.
     retirement_ptr& operator=(const retirement_ptr& other) noexcept {
         retirement_ptr next(other);
         swap(next);
