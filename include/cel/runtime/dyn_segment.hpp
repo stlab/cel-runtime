@@ -74,9 +74,9 @@ struct stack_requirements {
 
 namespace detail {
 struct frozen_program;
-/// Selects native leaf boundaries rather than unspecified standard composite layouts.
+/// Selects borrowed native leaves rather than canonical record or composite layouts.
 template <class T>
-inline constexpr bool native_leaf = true;
+inline constexpr bool native_leaf = !nominal_record_adapter<T>;
 /// Selects the trusted vector adapter.
 template <class T, class A>
 inline constexpr bool native_leaf<std::vector<T, A>> = false;

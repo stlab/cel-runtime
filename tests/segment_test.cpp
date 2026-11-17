@@ -54,6 +54,20 @@ struct segment_widget {
     segment_bounds bounds;
 };
 
+/// Holds coordinates in an order different from its canonical record schema.
+struct segment_reordered_point {
+    /// Stores the vertical coordinate.
+    double y;
+    /// Stores the horizontal coordinate.
+    double x;
+};
+
+/// Holds an owned callable field for typed-result lifetime tests.
+struct segment_callable_record {
+    /// Owns one callable value.
+    cel::value code;
+};
+
 /// Holds test input for ownership-mismatch adapter regression checks.
 struct ownership_gap_payload {
     /// Seeds the synthetic callable carrier.
@@ -101,6 +115,15 @@ cel::value make_foreign_callable_value(int seed) {
     return cel::detail::value_access::copy(foreign_callable_type(), carrier.data());
 }
 
+/// Returns one callable value with the primary ownership pair.
+cel::value make_primary_callable_value(int seed) {
+    int payload = seed;
+    int* pointer = &payload;
+    std::array<std::byte, sizeof(pointer)> carrier{};
+    std::memcpy(carrier.data(), static_cast<const void*>(&pointer), sizeof(pointer));
+    return cel::detail::value_access::copy(primary_callable_type(), carrier.data());
+}
+
 namespace cel {
 template <>
 struct record_adapter<segment_bounds> {
@@ -143,6 +166,49 @@ struct record_adapter<segment_widget> {
         if (!source.type().same_shape(type())) throw std::invalid_argument("wrong segment widget type");
         return {.enabled = source.field("enabled").as<bool>(),
                 .bounds = source.field("bounds").as<segment_bounds>()};
+    }
+};
+
+template <>
+struct record_adapter<::segment_reordered_point> {
+    /// Returns the canonical coordinate schema.
+    static value_type type() {
+        static const auto descriptor =
+            value_type::record("tests.segment_reordered_point",
+                               std::array{record_field{"x", value_type::leaf<double>()},
+                                          record_field{"y", value_type::leaf<double>()}});
+        return descriptor;
+    }
+    /// Encodes coordinates by their names rather than their native order.
+    static value to_value(const ::segment_reordered_point& source) {
+        return value::record(type(), std::array{value::from(source.x), value::from(source.y)});
+    }
+    /// Decodes coordinates by their canonical names.
+    static ::segment_reordered_point from_value(const value& source) {
+        if (!source.type().same_shape(type()))
+            throw std::invalid_argument("wrong reordered point type");
+        return {.y = source.field("y").as<double>(), .x = source.field("x").as<double>()};
+    }
+};
+
+template <>
+struct record_adapter<::segment_callable_record> {
+    /// Returns the callable record schema.
+    static value_type type() {
+        static const auto descriptor =
+            value_type::record("tests.segment_callable_record",
+                               std::array{record_field{"code", primary_callable_type()}});
+        return descriptor;
+    }
+    /// Encodes the callable field as an owned canonical value.
+    static value to_value(const ::segment_callable_record& source) {
+        return value::record(type(), std::array{source.code});
+    }
+    /// Copies the owned callable field from a validated record.
+    static ::segment_callable_record from_value(const value& source) {
+        if (!source.type().same_shape(type()))
+            throw std::invalid_argument("wrong callable record type");
+        return {.code = source.field("code")};
     }
 };
 
@@ -541,6 +607,36 @@ TEST_CASE("typed operations accept nominal record adapters and propagate callbac
     CHECK(result.bounds.width == doctest::Approx(4.0));
     CHECK(result.bounds.height == doctest::Approx(7.0));
     CHECK(stack.pop<std::vector<double>>() == std::vector<double>{7.0});
+}
+
+TEST_CASE("typed record operands preserve canonical field order") {
+    cel::dyn_segment builder;
+    builder.push_argument(0, cel::native_type<segment_reordered_point>());
+    builder.op1<segment_reordered_point, segment_reordered_point>(
+        [](segment_reordered_point point) { return point; });
+    auto prepared =
+        std::move(builder).finish().prepare<segment_reordered_point, segment_reordered_point>();
+    cel::raw_stack stack;
+    const segment_reordered_point input{.y = 2.0, .x = 1.0};
+    const auto result = prepared.call(stack, input);
+    CHECK(result.x == doctest::Approx(1.0));
+    CHECK(result.y == doctest::Approx(2.0));
+}
+
+TEST_CASE("typed record results retire their canonical owned fields") {
+    auto code = make_primary_callable_value(17);
+    cel::dyn_segment builder;
+    builder.op0<segment_callable_record>(
+        [code = std::move(code)] { return segment_callable_record{.code = code}; });
+    auto prepared = std::move(builder).finish().prepare<segment_callable_record>();
+    cel::raw_stack stack;
+    const auto live = live_carriers;
+    {
+        const auto result = prepared.call(stack);
+        CHECK(result.code.type().same_shape(primary_callable_type()));
+        CHECK(live_carriers == live + 1);
+    }
+    CHECK(live_carriers == live);
 }
 
 TEST_CASE("typed record adapter rejects same-shape incompatible ownership before transfer") {
