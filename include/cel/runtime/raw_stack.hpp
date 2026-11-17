@@ -97,8 +97,8 @@ class raw_stack {
     T read_value(std::size_t floor) {
         if (depth() <= floor) throw std::out_of_range("operand underflow");
         phase_guard phase(*this);
-        const auto type = detail::concrete_adapter<T>::type();
-        return detail::concrete_adapter<T>::read(type, borrow(floor, 0, type));
+        const auto type = detail::boundary_adapter<T>::type();
+        return detail::boundary_adapter<T>::read(type, borrow(floor, 0, type));
     }
     /// Reserves an aligned uninitialized operand extent and returns its byte offset.
     ///
@@ -288,9 +288,9 @@ public:
     template <class T>
     void push(const T& source) {
         require_access(nullptr);
-        push_written(detail::concrete_adapter<T>::type(), &source,
+        push_written(detail::boundary_adapter<T>::type(), &source,
                      [](const void* input, const value_type& type, std::byte* destination) {
-                         detail::concrete_adapter<T>::write(*static_cast<const T*>(input), type,
+                         detail::boundary_adapter<T>::write(*static_cast<const T*>(input), type,
                                                             destination);
                      });
     }

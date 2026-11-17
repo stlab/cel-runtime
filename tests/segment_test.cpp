@@ -38,6 +38,68 @@ struct alignas(256) client_leaf {
     int number; ///< Retains a client-defined scalar.
 };
 
+/// Holds one nested nominal record for typed-operation adapter tests.
+struct segment_bounds {
+    /// Stores the horizontal extent.
+    double width;
+    /// Stores the vertical extent.
+    double height;
+};
+
+/// Holds one nominal record consumed by typed callbacks.
+struct segment_widget {
+    /// Records whether the widget is active.
+    bool enabled;
+    /// Records nested bounds.
+    segment_bounds bounds;
+};
+
+namespace cel {
+template <>
+struct record_adapter<segment_bounds> {
+    /// Returns the complete nested descriptor.
+    static value_type type() {
+        static const auto descriptor =
+            value_type::record("tests.segment_bounds",
+                               std::array{record_field{"width", value_type::leaf<double>()},
+                                          record_field{"height", value_type::leaf<double>()}});
+        return descriptor;
+    }
+    /// Encodes one nested record value.
+    static value to_value(const segment_bounds& source) {
+        return value::record(type(), std::array{value::from(source.width), value::from(source.height)});
+    }
+    /// Decodes one nested record value.
+    static segment_bounds from_value(const value& source) {
+        if (!source.type().same_shape(type())) throw std::invalid_argument("wrong segment bounds type");
+        return {.width = source.field("width").as<double>(), .height = source.field("height").as<double>()};
+    }
+};
+
+template <>
+struct record_adapter<segment_widget> {
+    /// Returns the complete nominal descriptor.
+    static value_type type() {
+        static const auto descriptor =
+            value_type::record("tests.segment_widget",
+                               std::array{record_field{"enabled", value_type::leaf<bool>()},
+                                          record_field{"bounds", record_adapter<segment_bounds>::type()}});
+        return descriptor;
+    }
+    /// Encodes one nominal record value.
+    static value to_value(const segment_widget& source) {
+        return value::record(type(),
+                             std::array{value::from(source.enabled), value::from(source.bounds)});
+    }
+    /// Decodes one nominal record value.
+    static segment_widget from_value(const value& source) {
+        if (!source.type().same_shape(type())) throw std::invalid_argument("wrong segment widget type");
+        return {.enabled = source.field("enabled").as<bool>(),
+                .bounds = source.field("bounds").as<segment_bounds>()};
+    }
+};
+} // namespace cel
+
 /// Catches byte-based counting, reversed suffixes, and inclusion of ambient operands.
 TEST_CASE("operand types borrow the older-first local logical suffix") {
     cel::dyn_segment empty;
@@ -387,6 +449,34 @@ TEST_CASE("throwing callbacks preserve caller prefix and reusable raw destinatio
     prepared.call_into(stack, views, result.data());
     CHECK(cel::detail::borrowed_value{types[0], result.data()}.as<double>() == 3.0);
     prepared.destroy_result(result.data());
+    CHECK(stack.pop<std::vector<double>>() == std::vector<double>{7.0});
+}
+
+TEST_CASE("typed operations accept nominal record adapters and propagate callback failures") {
+    CHECK(cel::native_type<segment_widget>().record_identity() == "tests.segment_widget");
+    bool fail = true;
+    cel::dyn_segment builder;
+    builder.push_argument(0, cel::native_type<segment_widget>());
+    builder.op1<segment_widget, segment_widget>([&fail](segment_widget value) {
+        if (fail) throw std::runtime_error("callback");
+        value.enabled = !value.enabled;
+        value.bounds.width += 1.0;
+        value.bounds.height += 2.0;
+        return value;
+    });
+    auto prepared = std::move(builder).finish().prepare<segment_widget, segment_widget>();
+    const segment_widget input{.enabled = true, .bounds = {.width = 3.0, .height = 5.0}};
+    cel::raw_stack stack;
+    stack.push(std::vector{7.0});
+    const auto cursor = stack.cursor();
+    CHECK_THROWS_AS(prepared.call(stack, input), std::runtime_error);
+    CHECK(stack.depth() == 1);
+    CHECK(stack.cursor() == cursor);
+    fail = false;
+    const auto result = prepared.call(stack, input);
+    CHECK_FALSE(result.enabled);
+    CHECK(result.bounds.width == doctest::Approx(4.0));
+    CHECK(result.bounds.height == doctest::Approx(7.0));
     CHECK(stack.pop<std::vector<double>>() == std::vector<double>{7.0});
 }
 
