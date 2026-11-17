@@ -54,6 +54,53 @@ struct segment_widget {
     segment_bounds bounds;
 };
 
+/// Holds test input for ownership-mismatch adapter regression checks.
+struct ownership_gap_payload {
+    /// Seeds the synthetic callable carrier.
+    int seed;
+};
+
+/// Returns the callable descriptor with the primary ownership pair.
+const cel::value_type& primary_callable_type() {
+    static const auto descriptor = cel::detail::type_access::install_callable_ownership(
+        cel::value_type::callable({}, cel::value_type::leaf<double>()),
+        {clone_carrier, destroy_carrier});
+    return descriptor;
+}
+
+/// Returns the callable descriptor with an incompatible ownership pair.
+const cel::value_type& foreign_callable_type() {
+    static const auto descriptor = cel::detail::type_access::install_callable_ownership(
+        cel::value_type::callable({}, cel::value_type::leaf<double>()),
+        {clone_carrier, destroy_other_carrier});
+    return descriptor;
+}
+
+/// Returns the declared nominal record descriptor with the primary callable ownership pair.
+const cel::value_type& declared_ownership_gap_type() {
+    static const auto descriptor = cel::value_type::record(
+        "tests.ownership_gap",
+        std::array{cel::record_field{"code", primary_callable_type()}});
+    return descriptor;
+}
+
+/// Returns a same-shape nominal record descriptor with incompatible callable ownership.
+const cel::value_type& foreign_ownership_gap_type() {
+    static const auto descriptor = cel::value_type::record(
+        "tests.ownership_gap",
+        std::array{cel::record_field{"code", foreign_callable_type()}});
+    return descriptor;
+}
+
+/// Returns one callable value with synthetic owned carrier storage.
+cel::value make_foreign_callable_value(int seed) {
+    int payload = seed;
+    int* pointer = &payload;
+    std::array<std::byte, sizeof(pointer)> carrier{};
+    std::memcpy(carrier.data(), static_cast<const void*>(&pointer), sizeof(pointer));
+    return cel::detail::value_access::copy(foreign_callable_type(), carrier.data());
+}
+
 namespace cel {
 template <>
 struct record_adapter<segment_bounds> {
@@ -96,6 +143,22 @@ struct record_adapter<segment_widget> {
         if (!source.type().same_shape(type())) throw std::invalid_argument("wrong segment widget type");
         return {.enabled = source.field("enabled").as<bool>(),
                 .bounds = source.field("bounds").as<segment_bounds>()};
+    }
+};
+
+template <>
+struct record_adapter<ownership_gap_payload> {
+    /// Returns the declared nominal descriptor with the primary ownership pair.
+    static value_type type() { return declared_ownership_gap_type(); }
+    /// Encodes the payload as a same-shape record with incompatible callable ownership.
+    static value to_value(const ownership_gap_payload& source) {
+        auto code = make_foreign_callable_value(source.seed);
+        return value::record(foreign_ownership_gap_type(), std::array{code});
+    }
+    /// Decodes this payload from a validated record value.
+    static ownership_gap_payload from_value(const value& source) {
+        if (!source.type().same_shape(type())) throw std::invalid_argument("wrong ownership-gap type");
+        return {.seed = 0};
     }
 };
 } // namespace cel
@@ -478,6 +541,37 @@ TEST_CASE("typed operations accept nominal record adapters and propagate callbac
     CHECK(result.bounds.width == doctest::Approx(4.0));
     CHECK(result.bounds.height == doctest::Approx(7.0));
     CHECK(stack.pop<std::vector<double>>() == std::vector<double>{7.0});
+}
+
+TEST_CASE("typed record adapter rejects same-shape incompatible ownership before transfer") {
+    cel::dyn_segment builder;
+    builder.op0<ownership_gap_payload>([] { return ownership_gap_payload{.seed = 7}; });
+    auto program = std::move(builder).finish();
+    const auto result_type = cel::native_type<ownership_gap_payload>();
+    auto prepared = cel::detail::segment_access::prepare_raw(program, {}, result_type);
+    const auto layout = result_type.byte_layout();
+    auto* destination =
+        static_cast<std::byte*>(::operator new(layout.size, std::align_val_t(layout.alignment)));
+    std::fill(destination, destination + layout.size, std::byte{0x5a});
+    cel::raw_stack stack;
+    stack.push(std::vector{9.0});
+    const auto cursor = stack.cursor();
+    const auto depth = stack.depth();
+    const auto live = live_carriers;
+    bool threw = false;
+    try {
+        prepared.call_into(stack, {}, destination);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    if (!threw) prepared.destroy_result(destination);
+    CHECK(threw);
+    if (threw) CHECK(destination[0] == std::byte{0x5a});
+    CHECK(live_carriers == live);
+    CHECK(stack.depth() == depth);
+    CHECK(stack.cursor() == cursor);
+    CHECK(stack.pop<std::vector<double>>() == std::vector<double>{9.0});
+    ::operator delete(destination, std::align_val_t(layout.alignment));
 }
 
 TEST_CASE("typed calls accept unused composite arguments") {

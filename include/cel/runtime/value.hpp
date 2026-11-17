@@ -572,7 +572,7 @@ struct boundary_adapter {
         if constexpr (nominal_record_adapter<T>) {
             const auto& expected = adapter_record_type<T>();
             auto encoded = record_adapter<T>::to_value(source);
-            if (!encoded.type().same_shape(expected))
+            if (!encoded.type().compatible_with(expected))
                 throw std::invalid_argument("record adapter returned the wrong nominal record type");
             return encoded;
         } else {
@@ -610,7 +610,7 @@ struct boundary_adapter {
     static void write(const T& source, const value_type& shape, std::byte* data) {
         if constexpr (nominal_record_adapter<T>) {
             const auto& expected = adapter_record_type<T>();
-            if (!shape.same_shape(expected))
+            if (!shape.compatible_with(expected))
                 throw std::invalid_argument("wrong nominal record type");
             auto encoded = from(source);
             value::release_canonical(encoded, data);
