@@ -2,6 +2,7 @@
 #ifndef CEL_RUNTIME_VALUE_HPP
 #define CEL_RUNTIME_VALUE_HPP
 
+#include <cel/runtime/record_adapter.hpp>
 #include <cel/runtime/value_type.hpp>
 
 #include <array>
@@ -12,12 +13,14 @@
 #include <span>
 #include <stdexcept>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace cel {
 /// \addtogroup runtime_values
 /// @{
+class value;
 
 /// Provides trusted concrete boundary adapters; these are not client-leaf registrations.
 namespace detail {
@@ -35,6 +38,14 @@ struct array_view {
 };
 template <class T>
 struct concrete_adapter;
+template <class T>
+concept nominal_record_adapter = requires(const T& input, const value& encoded) {
+    { record_adapter<T>::type() } -> std::same_as<value_type>;
+    { record_adapter<T>::to_value(input) } -> std::same_as<value>;
+    { record_adapter<T>::from_value(encoded) } -> std::same_as<T>;
+};
+template <class T>
+struct boundary_adapter;
 } // namespace detail
 
 /// Holds any type representable by CEL, including client-defined types.
@@ -74,6 +85,8 @@ class value {
     friend struct detail::value_access;
     template <class T>
     friend struct detail::concrete_adapter;
+    template <class T>
+    friend struct detail::boundary_adapter;
 
     /// Takes uniquely owned, fully initialized payload storage.
     ///
@@ -115,6 +128,14 @@ class value {
     ///
     /// The view expires when owner changes or dies; unit can have null bytes.
     static const std::byte* raw_data(const value& owner) noexcept;
+    /// Copies one canonical owner into an independent public value.
+    ///
+    /// \pre type and data describe one complete readable owned representation.
+    static value copy_canonical(const value_type& type, const std::byte* data);
+    /// Transfers one canonical owner into destination and leaves source unit.
+    ///
+    /// \pre destination is aligned writable uninitialized storage for source.type().
+    static void release_canonical(value& source, std::byte* destination) noexcept;
     /// Borrows packed array elements from a live canonical carrier.
     ///
     /// \pre data contains an initialized array carrier and its owner remains alive and
@@ -197,7 +218,7 @@ public:
     ///
     /// Example: `value::from(true).type().kind() == type_kind::leaf`.
     const value_type& type() const;
-    /// Copies a concrete leaf or recursively nested owning vector/tuple into a runtime value.
+    /// Copies a concrete leaf, nominal record adapter, or nested owning vector/tuple value.
     ///
     /// Leaves source unchanged; pointer members in opaque leaves do not confer pointee ownership.
     /// Complexity: linear in source area, plus first-use native_type construction; owned result
@@ -206,9 +227,9 @@ public:
     /// Example: `auto numbers = value::from(std::vector<double>{1.0, 2.0});`.
     template <class T>
     static value from(const T& source) {
-        return detail::concrete_adapter<std::remove_cv_t<T>>::from(source);
+        return detail::boundary_adapter<std::remove_cv_t<T>>::from(source);
     }
-    /// Returns a concrete copy of the exact requested leaf, vector, or tuple type.
+    /// Returns a concrete copy of the exact requested adapter, leaf, vector, or tuple type.
     ///
     /// Returned vectors and tuples own independent mutable payloads; leaf pointers remain pointers.
     ///
@@ -220,7 +241,7 @@ public:
     /// Example: `value::from(2.0).as<double>() == 2.0`.
     template <class T>
     T as() const {
-        return detail::concrete_adapter<std::remove_cv_t<T>>::as(*this);
+        return detail::boundary_adapter<std::remove_cv_t<T>>::as(*this);
     }
     /// Copies a sequence of elements with the specified complete shape and ownership operations.
     ///
@@ -369,7 +390,7 @@ struct concrete_adapter<std::vector<T, Allocator>> {
     /// Complexity: first use includes element descriptor construction; subsequent calls
     /// take O(1) time and auxiliary space.
     static value_type type() {
-        static const auto descriptor = value_type::array(concrete_adapter<T>::type());
+        static const auto descriptor = value_type::array(boundary_adapter<T>::type());
         return descriptor;
     }
     /// Copies all elements independently.
@@ -398,7 +419,7 @@ struct concrete_adapter<std::vector<T, Allocator>> {
                               std::byte* target) {
                                const auto& input =
                                    *static_cast<const std::vector<T, Allocator>*>(object);
-                               concrete_adapter<T>::write(input[index], element, target);
+                               boundary_adapter<T>::write(input[index], element, target);
                            });
     }
     /// Returns a vector with independently owned elements.
@@ -425,7 +446,7 @@ struct concrete_adapter<std::vector<T, Allocator>> {
         result.reserve(children.size);
         // Extract each element through its trusted concrete adapter.
         for (std::size_t i = 0; i != children.size; ++i)
-            result.push_back(concrete_adapter<T>::read(
+            result.push_back(boundary_adapter<T>::read(
                 children.element, children.data ? children.data + i * children.stride : nullptr));
         return result;
     }
@@ -440,7 +461,7 @@ struct concrete_adapter<std::tuple<T...>> {
     /// time and result metadata; subsequent calls take O(1) time and auxiliary space.
     static value_type type() {
         static const auto descriptor = [] {
-            const std::array<value_type, sizeof...(T)> fields{concrete_adapter<T>::type()...};
+            const std::array<value_type, sizeof...(T)> fields{boundary_adapter<T>::type()...};
             return value_type::tuple(fields);
         }();
         return descriptor;
@@ -470,7 +491,7 @@ struct concrete_adapter<std::tuple<T...>> {
                              std::index_sequence<I...>) {
         std::size_t completed = 0;
         try {
-            ((concrete_adapter<T>::write(std::get<I>(source), shape.fields()[I],
+            ((boundary_adapter<T>::write(std::get<I>(source), shape.fields()[I],
                                          data ? data + shape.offsets()[I] : nullptr),
               ++completed),
              ...);
@@ -499,7 +520,7 @@ struct concrete_adapter<std::tuple<T...>> {
     static std::tuple<T...> extract(const value_type& shape,
                                     const std::byte* data,
                                     std::index_sequence<I...>) {
-        return {concrete_adapter<T>::read(shape.fields()[I],
+        return {boundary_adapter<T>::read(shape.fields()[I],
                                           data ? data + shape.offsets()[I] : nullptr)...};
     }
     /// Returns a tuple with independently owned fields.
@@ -525,10 +546,85 @@ struct concrete_adapter<std::tuple<T...>> {
     }
 };
 
+template <class T>
+const value_type& adapter_record_type() {
+    static const auto descriptor = [] {
+        auto declared = record_adapter<T>::type();
+        if (declared.kind() != type_kind::record)
+            throw std::invalid_argument("record adapter type must be a nominal record");
+        return declared;
+    }();
+    return descriptor;
+}
+
+template <class T>
+struct boundary_adapter {
+    /// Returns the complete descriptor for this trusted native adapter boundary.
+    static value_type type() {
+        if constexpr (nominal_record_adapter<T>) {
+            return adapter_record_type<T>();
+        } else {
+            return concrete_adapter<T>::type();
+        }
+    }
+    /// Returns an owned canonical value for one native source value.
+    static value from(const T& source) {
+        if constexpr (nominal_record_adapter<T>) {
+            const auto& expected = adapter_record_type<T>();
+            auto encoded = record_adapter<T>::to_value(source);
+            if (!encoded.type().compatible_with(expected))
+                throw std::invalid_argument("record adapter returned the wrong nominal record type");
+            return encoded;
+        } else {
+            return concrete_adapter<T>::from(source);
+        }
+    }
+    /// Returns one native value decoded from a complete descriptor-checked source value.
+    static T as(const value& source) {
+        if constexpr (nominal_record_adapter<T>) {
+            const auto& expected = adapter_record_type<T>();
+            if (!source.type().same_shape(expected))
+                throw std::invalid_argument("wrong nominal record type");
+            return record_adapter<T>::from_value(source);
+        } else {
+            return concrete_adapter<T>::as(source);
+        }
+    }
+    /// Returns one native value decoded from trusted canonical bytes.
+    ///
+    /// \pre shape is type(), and data provides one valid readable owned representation.
+    static T read(const value_type& shape, const std::byte* data) {
+        if constexpr (nominal_record_adapter<T>) {
+            const auto& expected = adapter_record_type<T>();
+            if (!shape.same_shape(expected))
+                throw std::invalid_argument("wrong nominal record type");
+            auto encoded = value::copy_canonical(shape, data);
+            return record_adapter<T>::from_value(encoded);
+        } else {
+            return concrete_adapter<T>::read(shape, data);
+        }
+    }
+    /// Writes one native value into trusted canonical bytes.
+    ///
+    /// \pre shape is type(), and data provides one writable uninitialized extent.
+    static void write(const T& source, const value_type& shape, std::byte* data) {
+        if constexpr (nominal_record_adapter<T>) {
+            const auto& expected = adapter_record_type<T>();
+            if (!shape.compatible_with(expected))
+                throw std::invalid_argument("wrong nominal record type");
+            auto encoded = from(source);
+            value::release_canonical(encoded, data);
+        } else {
+            concrete_adapter<T>::write(source, shape, data);
+        }
+    }
+};
+
 } // namespace detail
 /// Returns the runtime's complete descriptor for a trusted native value type.
 ///
 /// Tuples and vectors use canonical structural adapters, not native object layouts.
+/// record_adapter specializations provide complete nominal-record descriptors.
 /// Complexity: O(V + E) time and result metadata on first use, with V distinct concrete
 /// descriptor types and E their field/element edges; O(concrete nesting depth) call space.
 /// Subsequent calls take O(1) time and auxiliary space.
@@ -536,7 +632,7 @@ struct concrete_adapter<std::tuple<T...>> {
 /// Example: `auto type = native_type<std::vector<std::tuple<bool, double>>>();`.
 template <class T>
 value_type native_type() {
-    return detail::concrete_adapter<std::remove_cvref_t<T>>::type();
+    return detail::boundary_adapter<std::remove_cvref_t<T>>::type();
 }
 
 /// @}

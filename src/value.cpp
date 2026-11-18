@@ -485,6 +485,12 @@ void value::copy_leaf(const value_type& expected, void* destination) const {
 const std::byte* value::raw_data(const value& owner) noexcept {
     return detail::value_access::data(owner);
 }
+value value::copy_canonical(const value_type& type, const std::byte* data) {
+    return detail::value_access::copy(type, data);
+}
+void value::release_canonical(value& source, std::byte* destination) noexcept {
+    detail::value_access::release_to(source, destination);
+}
 detail::array_view value::array_data(const std::byte* data) noexcept {
     const auto* owner = detail::read_array(data).owner;
     return {owner->element, owner->bytes.data(), owner->count, owner->element.byte_layout().size};

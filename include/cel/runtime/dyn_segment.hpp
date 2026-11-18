@@ -74,9 +74,9 @@ struct stack_requirements {
 
 namespace detail {
 struct frozen_program;
-/// Selects native leaf boundaries rather than unspecified standard composite layouts.
+/// Selects borrowed native leaves rather than canonical record or composite layouts.
 template <class T>
-inline constexpr bool native_leaf = true;
+inline constexpr bool native_leaf = !nominal_record_adapter<T>;
 /// Selects the trusted vector adapter.
 template <class T, class A>
 inline constexpr bool native_leaf<std::vector<T, A>> = false;
@@ -539,7 +539,7 @@ public:
     void just(value literal);
     /// Emits an arbitrary-arity const callback with exact declared operands and result.
     ///
-    /// R is a trusted concrete adapter type or void; void consumes without producing a value.
+    /// R is a trusted native adapter type or void; void consumes without producing a value.
     /// Parameter/result identities are exact after cv/reference removal. Reference results are
     /// copied into an independently owned result; implicit result conversions are not admitted.
     /// Use with_signature for ambiguous or uninspectable callback members. Generic members
@@ -563,12 +563,12 @@ public:
     requires(detail::exact_callback<F, R, Args...>()) void op(F&& callback) {
         static_assert((std::same_as<Args, std::remove_cvref_t<Args>> && ...));
         const std::array<value_type, sizeof...(Args)> inputs{
-            detail::concrete_adapter<Args>::type()...};
+            detail::boundary_adapter<Args>::type()...};
         const auto outputs = [] {
             if constexpr (std::is_void_v<R>)
                 return std::array<value_type, 0>{};
             else
-                return std::array{detail::concrete_adapter<R>::type()};
+                return std::array{detail::boundary_adapter<R>::type()};
         }();
         const auto effect = check_operation(inputs, outputs);
         _body.template push_op<R, Args...>(
@@ -963,12 +963,12 @@ public:
         if constexpr (detail::native_leaf<R>) {
             alignas(R) std::array<std::byte, sizeof(R)> bytes{};
             _binding.call_into(stack, views, bytes.data());
-            return detail::concrete_adapter<R>::read(_binding.result_type(), bytes.data());
+            return detail::boundary_adapter<R>::read(_binding.result_type(), bytes.data());
         } else {
             detail::result_storage result(_binding);
             _binding.call_into(stack, views, result.data());
             result.initialized();
-            return detail::concrete_adapter<R>::read(_binding.result_type(), result.data());
+            return detail::boundary_adapter<R>::read(_binding.result_type(), result.data());
         }
     }
 };
@@ -977,8 +977,8 @@ public:
 template <class R, class... Args>
 prepared_segment<R, Args...> compiled_segment::prepare() const {
     static_assert(!std::is_void_v<R>, "use tuple<> for the source-unit result");
-    const std::array<value_type, sizeof...(Args)> types{detail::concrete_adapter<Args>::type()...};
-    return prepared_segment<R, Args...>(prepare_raw(types, detail::concrete_adapter<R>::type()));
+    const std::array<value_type, sizeof...(Args)> types{detail::boundary_adapter<Args>::type()...};
+    return prepared_segment<R, Args...>(prepare_raw(types, detail::boundary_adapter<R>::type()));
 }
 
 /// @}

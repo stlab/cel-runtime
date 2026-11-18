@@ -72,14 +72,14 @@ class raw_segment {
             if constexpr (std::is_void_v<R>)
                 return std::array<value_type, 0>{};
             else
-                return std::array{detail::concrete_adapter<R>::type()};
+                return std::array{detail::boundary_adapter<R>::type()};
         }
         /// Constructs signature metadata and an owned callback from its source.
         ///
         /// Complexity: operand/result descriptor construction and callback construction costs.
         template <class G>
         requires std::constructible_from<F, G&&> explicit operation(G&& input) :
-            inputs{detail::concrete_adapter<Args>::type()...}, outputs(result_types()),
+            inputs{detail::boundary_adapter<Args>::type()...}, outputs(result_types()),
             callback(std::forward<G>(input)) {}
         /// Consumes source-ordered operands, invokes the callback, and publishes its result.
         ///

@@ -51,6 +51,42 @@ stored bytes, not resources reached through pointers inside those bytes.
 Use the provided `std::vector<T>` and `std::tuple<T...>` adapters for owning
 arrays and tuples instead of wrapping nontrivial containers as opaque leaves.
 
+For a nontrivial nominal record, specialize `cel::record_adapter<T>` with a
+record descriptor and field-wise encode/decode callbacks:
+
+```cpp
+struct point {
+    double x;
+    double y;
+};
+
+template <>
+struct cel::record_adapter<point> {
+    static cel::value_type type() {
+        static const auto descriptor = cel::value_type::record(
+            "sample.point",
+            std::array{cel::record_field{"x", cel::value_type::leaf<double>()},
+                       cel::record_field{"y", cel::value_type::leaf<double>()}});
+        return descriptor;
+    }
+    static cel::value to_value(const point& source) {
+        return cel::value::record(type(),
+                                  std::array{cel::value::from(source.x),
+                                             cel::value::from(source.y)});
+    }
+    static point from_value(const cel::value& source) {
+        if (!source.type().same_shape(type()))
+            throw std::invalid_argument("wrong point type");
+        return {.x = source.field("x").as<double>(),
+                .y = source.field("y").as<double>()};
+    }
+};
+```
+
+The runtime requires `type()` to be a nominal record. `value::from<T>()`
+verifies that `to_value()` returns exactly that schema. `value::as<T>()` checks
+complete nominal identity and schema before `from_value()`.
+
 ## Choose the result boundary
 
 Use `prepare<R, Args...>()` when the application knows the signature.

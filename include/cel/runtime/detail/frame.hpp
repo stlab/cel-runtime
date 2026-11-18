@@ -48,9 +48,9 @@ public:
     /// Example: `auto n = input.as<double>();`.
     template <class T>
     T as() const {
-        const auto expected = detail::concrete_adapter<T>::type();
+        const auto expected = detail::boundary_adapter<T>::type();
         require_type(expected);
-        return detail::concrete_adapter<T>::read(type, data);
+        return detail::boundary_adapter<T>::read(type, data);
     }
 };
 
@@ -111,7 +111,7 @@ class frame {
     /// Complexity: native read work, result storage, and adapter auxiliary space.
     template <class T>
     T read_operand(std::size_t from_top, const value_type& expected) const {
-        return detail::concrete_adapter<T>::read(
+        return detail::boundary_adapter<T>::read(
             expected, _stack->borrow_trusted(_checkpoint, from_top, expected));
     }
     /// Returns independent concrete operands in source order without consuming them.
@@ -155,7 +155,7 @@ class frame {
         require_active();
         _stack->push_written(
             type, &source, [](const void* input, const value_type& shape, std::byte* destination) {
-                detail::concrete_adapter<T>::write(*static_cast<const T*>(input), shape,
+                detail::boundary_adapter<T>::write(*static_cast<const T*>(input), shape,
                                                    destination);
             });
     }
@@ -268,7 +268,7 @@ public:
     /// Example: `scope.push(2.0);`.
     template <class T>
     void push(const T& source) {
-        push_result(detail::concrete_adapter<T>::type(), source);
+        push_result(detail::boundary_adapter<T>::type(), source);
     }
     /// Removes and returns an independent concrete copy of the top suffix operand.
     ///

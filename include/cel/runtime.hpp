@@ -32,6 +32,7 @@
 #include <cel/runtime/dyn_segment.hpp>
 #include <cel/runtime/layout.hpp>
 #include <cel/runtime/raw_stack.hpp>
+#include <cel/runtime/record_adapter.hpp>
 #include <cel/runtime/value.hpp>
 #include <cel/runtime/value_type.hpp>
 

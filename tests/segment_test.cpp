@@ -38,6 +38,197 @@ struct alignas(256) client_leaf {
     int number; ///< Retains a client-defined scalar.
 };
 
+/// Holds one nested nominal record for typed-operation adapter tests.
+struct segment_bounds {
+    /// Stores the horizontal extent.
+    double width;
+    /// Stores the vertical extent.
+    double height;
+};
+
+/// Holds one nominal record consumed by typed callbacks.
+struct segment_widget {
+    /// Records whether the widget is active.
+    bool enabled;
+    /// Records nested bounds.
+    segment_bounds bounds;
+};
+
+/// Holds coordinates in an order different from its canonical record schema.
+struct segment_reordered_point {
+    /// Stores the vertical coordinate.
+    double y;
+    /// Stores the horizontal coordinate.
+    double x;
+};
+
+/// Holds an owned callable field for typed-result lifetime tests.
+struct segment_callable_record {
+    /// Owns one callable value.
+    cel::value code;
+};
+
+/// Holds test input for ownership-mismatch adapter regression checks.
+struct ownership_gap_payload {
+    /// Seeds the synthetic callable carrier.
+    int seed;
+};
+
+/// Returns the callable descriptor with the primary ownership pair.
+const cel::value_type& primary_callable_type() {
+    static const auto descriptor = cel::detail::type_access::install_callable_ownership(
+        cel::value_type::callable({}, cel::value_type::leaf<double>()),
+        {clone_carrier, destroy_carrier});
+    return descriptor;
+}
+
+/// Returns the callable descriptor with an incompatible ownership pair.
+const cel::value_type& foreign_callable_type() {
+    static const auto descriptor = cel::detail::type_access::install_callable_ownership(
+        cel::value_type::callable({}, cel::value_type::leaf<double>()),
+        {clone_carrier, destroy_other_carrier});
+    return descriptor;
+}
+
+/// Returns the declared nominal record descriptor with the primary callable ownership pair.
+const cel::value_type& declared_ownership_gap_type() {
+    static const auto descriptor = cel::value_type::record(
+        "tests.ownership_gap",
+        std::array{cel::record_field{"code", primary_callable_type()}});
+    return descriptor;
+}
+
+/// Returns a same-shape nominal record descriptor with incompatible callable ownership.
+const cel::value_type& foreign_ownership_gap_type() {
+    static const auto descriptor = cel::value_type::record(
+        "tests.ownership_gap",
+        std::array{cel::record_field{"code", foreign_callable_type()}});
+    return descriptor;
+}
+
+/// Returns one callable value with synthetic owned carrier storage.
+cel::value make_foreign_callable_value(int seed) {
+    int payload = seed;
+    int* pointer = &payload;
+    std::array<std::byte, sizeof(pointer)> carrier{};
+    std::memcpy(carrier.data(), static_cast<const void*>(&pointer), sizeof(pointer));
+    return cel::detail::value_access::copy(foreign_callable_type(), carrier.data());
+}
+
+/// Returns one callable value with the primary ownership pair.
+cel::value make_primary_callable_value(int seed) {
+    int payload = seed;
+    int* pointer = &payload;
+    std::array<std::byte, sizeof(pointer)> carrier{};
+    std::memcpy(carrier.data(), static_cast<const void*>(&pointer), sizeof(pointer));
+    return cel::detail::value_access::copy(primary_callable_type(), carrier.data());
+}
+
+namespace cel {
+template <>
+struct record_adapter<segment_bounds> {
+    /// Returns the complete nested descriptor.
+    static value_type type() {
+        static const auto descriptor =
+            value_type::record("tests.segment_bounds",
+                               std::array{record_field{"width", value_type::leaf<double>()},
+                                          record_field{"height", value_type::leaf<double>()}});
+        return descriptor;
+    }
+    /// Encodes one nested record value.
+    static value to_value(const segment_bounds& source) {
+        return value::record(type(), std::array{value::from(source.width), value::from(source.height)});
+    }
+    /// Decodes one nested record value.
+    static segment_bounds from_value(const value& source) {
+        if (!source.type().same_shape(type())) throw std::invalid_argument("wrong segment bounds type");
+        return {.width = source.field("width").as<double>(), .height = source.field("height").as<double>()};
+    }
+};
+
+template <>
+struct record_adapter<segment_widget> {
+    /// Returns the complete nominal descriptor.
+    static value_type type() {
+        static const auto descriptor =
+            value_type::record("tests.segment_widget",
+                               std::array{record_field{"enabled", value_type::leaf<bool>()},
+                                          record_field{"bounds", record_adapter<segment_bounds>::type()}});
+        return descriptor;
+    }
+    /// Encodes one nominal record value.
+    static value to_value(const segment_widget& source) {
+        return value::record(type(),
+                             std::array{value::from(source.enabled), value::from(source.bounds)});
+    }
+    /// Decodes one nominal record value.
+    static segment_widget from_value(const value& source) {
+        if (!source.type().same_shape(type())) throw std::invalid_argument("wrong segment widget type");
+        return {.enabled = source.field("enabled").as<bool>(),
+                .bounds = source.field("bounds").as<segment_bounds>()};
+    }
+};
+
+template <>
+struct record_adapter<::segment_reordered_point> {
+    /// Returns the canonical coordinate schema.
+    static value_type type() {
+        static const auto descriptor =
+            value_type::record("tests.segment_reordered_point",
+                               std::array{record_field{"x", value_type::leaf<double>()},
+                                          record_field{"y", value_type::leaf<double>()}});
+        return descriptor;
+    }
+    /// Encodes coordinates by their names rather than their native order.
+    static value to_value(const ::segment_reordered_point& source) {
+        return value::record(type(), std::array{value::from(source.x), value::from(source.y)});
+    }
+    /// Decodes coordinates by their canonical names.
+    static ::segment_reordered_point from_value(const value& source) {
+        if (!source.type().same_shape(type()))
+            throw std::invalid_argument("wrong reordered point type");
+        return {.y = source.field("y").as<double>(), .x = source.field("x").as<double>()};
+    }
+};
+
+template <>
+struct record_adapter<::segment_callable_record> {
+    /// Returns the callable record schema.
+    static value_type type() {
+        static const auto descriptor =
+            value_type::record("tests.segment_callable_record",
+                               std::array{record_field{"code", primary_callable_type()}});
+        return descriptor;
+    }
+    /// Encodes the callable field as an owned canonical value.
+    static value to_value(const ::segment_callable_record& source) {
+        return value::record(type(), std::array{source.code});
+    }
+    /// Copies the owned callable field from a validated record.
+    static ::segment_callable_record from_value(const value& source) {
+        if (!source.type().same_shape(type()))
+            throw std::invalid_argument("wrong callable record type");
+        return {.code = source.field("code")};
+    }
+};
+
+template <>
+struct record_adapter<ownership_gap_payload> {
+    /// Returns the declared nominal descriptor with the primary ownership pair.
+    static value_type type() { return declared_ownership_gap_type(); }
+    /// Encodes the payload as a same-shape record with incompatible callable ownership.
+    static value to_value(const ownership_gap_payload& source) {
+        auto code = make_foreign_callable_value(source.seed);
+        return value::record(foreign_ownership_gap_type(), std::array{code});
+    }
+    /// Decodes this payload from a validated record value.
+    static ownership_gap_payload from_value(const value& source) {
+        if (!source.type().same_shape(type())) throw std::invalid_argument("wrong ownership-gap type");
+        return {.seed = 0};
+    }
+};
+} // namespace cel
+
 /// Catches byte-based counting, reversed suffixes, and inclusion of ambient operands.
 TEST_CASE("operand types borrow the older-first local logical suffix") {
     cel::dyn_segment empty;
@@ -388,6 +579,95 @@ TEST_CASE("throwing callbacks preserve caller prefix and reusable raw destinatio
     CHECK(cel::detail::borrowed_value{types[0], result.data()}.as<double>() == 3.0);
     prepared.destroy_result(result.data());
     CHECK(stack.pop<std::vector<double>>() == std::vector<double>{7.0});
+}
+
+TEST_CASE("typed operations accept nominal record adapters and propagate callback failures") {
+    CHECK(cel::native_type<segment_widget>().record_identity() == "tests.segment_widget");
+    bool fail = true;
+    cel::dyn_segment builder;
+    builder.push_argument(0, cel::native_type<segment_widget>());
+    builder.op1<segment_widget, segment_widget>([&fail](segment_widget value) {
+        if (fail) throw std::runtime_error("callback");
+        value.enabled = !value.enabled;
+        value.bounds.width += 1.0;
+        value.bounds.height += 2.0;
+        return value;
+    });
+    auto prepared = std::move(builder).finish().prepare<segment_widget, segment_widget>();
+    const segment_widget input{.enabled = true, .bounds = {.width = 3.0, .height = 5.0}};
+    cel::raw_stack stack;
+    stack.push(std::vector{7.0});
+    const auto cursor = stack.cursor();
+    CHECK_THROWS_AS(prepared.call(stack, input), std::runtime_error);
+    CHECK(stack.depth() == 1);
+    CHECK(stack.cursor() == cursor);
+    fail = false;
+    const auto result = prepared.call(stack, input);
+    CHECK_FALSE(result.enabled);
+    CHECK(result.bounds.width == doctest::Approx(4.0));
+    CHECK(result.bounds.height == doctest::Approx(7.0));
+    CHECK(stack.pop<std::vector<double>>() == std::vector<double>{7.0});
+}
+
+TEST_CASE("typed record operands preserve canonical field order") {
+    cel::dyn_segment builder;
+    builder.push_argument(0, cel::native_type<segment_reordered_point>());
+    builder.op1<segment_reordered_point, segment_reordered_point>(
+        [](segment_reordered_point point) { return point; });
+    auto prepared =
+        std::move(builder).finish().prepare<segment_reordered_point, segment_reordered_point>();
+    cel::raw_stack stack;
+    const segment_reordered_point input{.y = 2.0, .x = 1.0};
+    const auto result = prepared.call(stack, input);
+    CHECK(result.x == doctest::Approx(1.0));
+    CHECK(result.y == doctest::Approx(2.0));
+}
+
+TEST_CASE("typed record results retire their canonical owned fields") {
+    auto code = make_primary_callable_value(17);
+    cel::dyn_segment builder;
+    builder.op0<segment_callable_record>(
+        [code = std::move(code)] { return segment_callable_record{.code = code}; });
+    auto prepared = std::move(builder).finish().prepare<segment_callable_record>();
+    cel::raw_stack stack;
+    const auto live = live_carriers;
+    {
+        const auto result = prepared.call(stack);
+        CHECK(result.code.type().same_shape(primary_callable_type()));
+        CHECK(live_carriers == live + 1);
+    }
+    CHECK(live_carriers == live);
+}
+
+TEST_CASE("typed record adapter rejects same-shape incompatible ownership before transfer") {
+    cel::dyn_segment builder;
+    builder.op0<ownership_gap_payload>([] { return ownership_gap_payload{.seed = 7}; });
+    auto program = std::move(builder).finish();
+    const auto result_type = cel::native_type<ownership_gap_payload>();
+    auto prepared = cel::detail::segment_access::prepare_raw(program, {}, result_type);
+    const auto layout = result_type.byte_layout();
+    auto* destination =
+        static_cast<std::byte*>(::operator new(layout.size, std::align_val_t(layout.alignment)));
+    std::fill(destination, destination + layout.size, std::byte{0x5a});
+    cel::raw_stack stack;
+    stack.push(std::vector{9.0});
+    const auto cursor = stack.cursor();
+    const auto depth = stack.depth();
+    const auto live = live_carriers;
+    bool threw = false;
+    try {
+        prepared.call_into(stack, {}, destination);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    if (!threw) prepared.destroy_result(destination);
+    CHECK(threw);
+    if (threw) CHECK(destination[0] == std::byte{0x5a});
+    CHECK(live_carriers == live);
+    CHECK(stack.depth() == depth);
+    CHECK(stack.cursor() == cursor);
+    CHECK(stack.pop<std::vector<double>>() == std::vector<double>{9.0});
+    ::operator delete(destination, std::align_val_t(layout.alignment));
 }
 
 TEST_CASE("typed calls accept unused composite arguments") {

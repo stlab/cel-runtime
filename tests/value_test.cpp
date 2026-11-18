@@ -36,6 +36,68 @@ struct other_leaf {
     double number;
 };
 
+/// Holds one named nested record consumed through the nominal adapter boundary.
+struct nominal_bounds {
+    /// Stores the horizontal extent.
+    double width;
+    /// Stores the vertical extent.
+    double height;
+};
+
+/// Holds one nominal record consumed through the adapter customization point.
+struct nominal_widget {
+    /// Records whether this widget is active.
+    bool enabled;
+    /// Records one nested nominal record.
+    nominal_bounds bounds;
+};
+
+namespace cel {
+template <>
+struct record_adapter<nominal_bounds> {
+    /// Returns this adapter's complete nested nominal descriptor.
+    static value_type type() {
+        static const auto descriptor = value_type::record(
+            "tests.nominal_bounds",
+            std::array{record_field{"width", value_type::leaf<double>()},
+                       record_field{"height", value_type::leaf<double>()}});
+        return descriptor;
+    }
+    /// Encodes one nested nominal value with source-order field ownership.
+    static value to_value(const nominal_bounds& source) {
+        return value::record(type(), std::array{value::from(source.width), value::from(source.height)});
+    }
+    /// Decodes one nested nominal value after complete descriptor validation.
+    static nominal_bounds from_value(const value& source) {
+        if (!source.type().same_shape(type())) throw std::invalid_argument("wrong nominal bounds type");
+        return {.width = source.field("width").as<double>(), .height = source.field("height").as<double>()};
+    }
+};
+
+template <>
+struct record_adapter<nominal_widget> {
+    /// Returns this adapter's complete nominal descriptor.
+    static value_type type() {
+        static const auto descriptor = value_type::record(
+            "tests.nominal_widget",
+            std::array{record_field{"enabled", value_type::leaf<bool>()},
+                       record_field{"bounds", record_adapter<nominal_bounds>::type()}});
+        return descriptor;
+    }
+    /// Encodes one nominal value with source-order field ownership.
+    static value to_value(const nominal_widget& source) {
+        return value::record(type(),
+                             std::array{value::from(source.enabled), value::from(source.bounds)});
+    }
+    /// Decodes one nominal value after complete descriptor validation.
+    static nominal_widget from_value(const value& source) {
+        if (!source.type().same_shape(type())) throw std::invalid_argument("wrong nominal widget type");
+        return {.enabled = source.field("enabled").as<bool>(),
+                .bounds = source.field("bounds").as<nominal_bounds>()};
+    }
+};
+} // namespace cel
+
 /// Requests a test callback failure after acquiring a temporary resource.
 bool fail_test_clone = false;
 /// Counts live resources created by the synthetic opaque clone callback.
@@ -323,6 +385,35 @@ TEST_CASE("concrete adapters preserve scalar values and reject wrong identities"
     CHECK_THROWS_AS(cel::value::from(true).as<double>(), std::invalid_argument);
     const auto nan = cel::value::from(std::numeric_limits<double>::quiet_NaN()).as<double>();
     CHECK(std::isnan(nan));
+}
+
+/// Catches nominal adapter layout casts and nested schema loss at the boundary.
+TEST_CASE("nominal record adapter round-trips values and enforces complete schemas") {
+    const nominal_widget input{.enabled = true, .bounds = {.width = 2.5, .height = 4.0}};
+    const auto encoded = cel::value::from(input);
+    const auto descriptor = encoded.type();
+    CHECK(descriptor.kind() == cel::type_kind::record);
+    CHECK(descriptor.record_identity() == "tests.nominal_widget");
+    REQUIRE(descriptor.field_names().size() == 2);
+    CHECK(descriptor.field_names()[0] == "enabled");
+    CHECK(descriptor.field_names()[1] == "bounds");
+    CHECK(descriptor.fields()[0].same_shape(cel::value_type::leaf<bool>()));
+    CHECK(descriptor.fields()[1].kind() == cel::type_kind::record);
+    CHECK(descriptor.fields()[1].record_identity() == "tests.nominal_bounds");
+    REQUIRE(descriptor.fields()[1].field_names().size() == 2);
+    CHECK(descriptor.fields()[1].field_names()[0] == "width");
+    CHECK(descriptor.fields()[1].field_names()[1] == "height");
+    const auto decoded = encoded.as<nominal_widget>();
+    CHECK(decoded.enabled);
+    CHECK(decoded.bounds.width == doctest::Approx(2.5));
+    CHECK(decoded.bounds.height == doctest::Approx(4.0));
+    const auto wrong = cel::value::record(
+        cel::value_type::record("tests.other_widget",
+                                std::array{cel::record_field{"enabled", cel::value_type::leaf<bool>()},
+                                           cel::record_field{"bounds", cel::record_adapter<nominal_bounds>::type()}}),
+        std::array{cel::value::from(true),
+                   cel::value::from(nominal_bounds{.width = 1.0, .height = 1.0})});
+    CHECK_THROWS_AS(cel::record_adapter<nominal_widget>::from_value(wrong), std::invalid_argument);
 }
 
 /// Catches conflation of empty array, source unit, and singleton tuple.
