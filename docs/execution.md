@@ -137,8 +137,7 @@ same-shape ownership ABIs. Complete compatibility also checks every callable
 result's ownership, including callables inside aggregate results, before
 checked execution or preparation admits the input. Prepared execution does not
 repeat these comparisons. Results may be client leaves, nested aggregates, or
-another callable. The installed consumer exercises receipt after builders and
-the temporary compiled factory disappear.
+another callable.
 
 `value_type::callable(parameters, result)` describes a semantic signature
 without ownership operations. Use `bind_runtime_ownership(type)` when checked

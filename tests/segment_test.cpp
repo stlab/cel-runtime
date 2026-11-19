@@ -93,16 +93,14 @@ const cel::value_type& foreign_callable_type() {
 /// Returns the declared nominal record descriptor with the primary callable ownership pair.
 const cel::value_type& declared_ownership_gap_type() {
     static const auto descriptor = cel::value_type::record(
-        "tests.ownership_gap",
-        std::array{cel::record_field{"code", primary_callable_type()}});
+        "tests.ownership_gap", std::array{cel::record_field{"code", primary_callable_type()}});
     return descriptor;
 }
 
 /// Returns a same-shape nominal record descriptor with incompatible callable ownership.
 const cel::value_type& foreign_ownership_gap_type() {
     static const auto descriptor = cel::value_type::record(
-        "tests.ownership_gap",
-        std::array{cel::record_field{"code", foreign_callable_type()}});
+        "tests.ownership_gap", std::array{cel::record_field{"code", foreign_callable_type()}});
     return descriptor;
 }
 
@@ -129,20 +127,22 @@ template <>
 struct record_adapter<segment_bounds> {
     /// Returns the complete nested descriptor.
     static value_type type() {
-        static const auto descriptor =
-            value_type::record("tests.segment_bounds",
-                               std::array{record_field{"width", value_type::leaf<double>()},
-                                          record_field{"height", value_type::leaf<double>()}});
+        static const auto descriptor = value_type::record(
+            "tests.segment_bounds", std::array{record_field{"width", value_type::leaf<double>()},
+                                               record_field{"height", value_type::leaf<double>()}});
         return descriptor;
     }
     /// Encodes one nested record value.
     static value to_value(const segment_bounds& source) {
-        return value::record(type(), std::array{value::from(source.width), value::from(source.height)});
+        return value::record(type(),
+                             std::array{value::from(source.width), value::from(source.height)});
     }
     /// Decodes one nested record value.
     static segment_bounds from_value(const value& source) {
-        if (!source.type().same_shape(type())) throw std::invalid_argument("wrong segment bounds type");
-        return {.width = source.field("width").as<double>(), .height = source.field("height").as<double>()};
+        if (!source.type().same_shape(type()))
+            throw std::invalid_argument("wrong segment bounds type");
+        return {.width = source.field("width").as<double>(),
+                .height = source.field("height").as<double>()};
     }
 };
 
@@ -150,10 +150,10 @@ template <>
 struct record_adapter<segment_widget> {
     /// Returns the complete nominal descriptor.
     static value_type type() {
-        static const auto descriptor =
-            value_type::record("tests.segment_widget",
-                               std::array{record_field{"enabled", value_type::leaf<bool>()},
-                                          record_field{"bounds", record_adapter<segment_bounds>::type()}});
+        static const auto descriptor = value_type::record(
+            "tests.segment_widget",
+            std::array{record_field{"enabled", value_type::leaf<bool>()},
+                       record_field{"bounds", record_adapter<segment_bounds>::type()}});
         return descriptor;
     }
     /// Encodes one nominal record value.
@@ -163,7 +163,8 @@ struct record_adapter<segment_widget> {
     }
     /// Decodes one nominal record value.
     static segment_widget from_value(const value& source) {
-        if (!source.type().same_shape(type())) throw std::invalid_argument("wrong segment widget type");
+        if (!source.type().same_shape(type()))
+            throw std::invalid_argument("wrong segment widget type");
         return {.enabled = source.field("enabled").as<bool>(),
                 .bounds = source.field("bounds").as<segment_bounds>()};
     }
@@ -223,7 +224,8 @@ struct record_adapter<ownership_gap_payload> {
     }
     /// Decodes this payload from a validated record value.
     static ownership_gap_payload from_value(const value& source) {
-        if (!source.type().same_shape(type())) throw std::invalid_argument("wrong ownership-gap type");
+        if (!source.type().same_shape(type()))
+            throw std::invalid_argument("wrong ownership-gap type");
         return {.seed = 0};
     }
 };

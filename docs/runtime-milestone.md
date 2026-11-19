@@ -75,12 +75,10 @@ Independent final port review and remote/platform validation remain pending.
 
 ## Reproduce local validation
 
-The pinned cpp-library release is `v6.0.2` at revision
-`df18f94c816df6dc4fbab8078e6b57a7d265a2c2`. Its presets, doctest/CTest,
+The pinned cpp-library release is `v6.1.0` at revision
+`13ff79ac9fbbf575bbab0ab3dee0c752b4501fcc`. Its presets, doctest/CTest,
 compile-fail gates, Doxygen, exports, installation, and generated CI remain in
-use. The installed-consumer CTest installs the built configuration to an
-isolated prefix, rejects leaked source/sibling paths, and compiles two real
-clients using only the imported package.
+use.
 
 Run Debug and lint checks from the checkout:
 
@@ -116,8 +114,8 @@ ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
   ctest --test-dir build/sanitized --output-on-failure
 ```
 
-The original milestone's 16 CTests, including six compile-fail gates, the runnable example, and
-installed consumption, pass in Debug, Release, supported ASan+UBSan, and
+The original milestone's runtime tests, compile-fail gates, and runnable example
+pass in Debug, Release, supported ASan+UBSan, and
 clang-tidy configurations. Compiler output is warning-free, formatting passes,
 and strict Doxygen passes. Explicit owner counters supplement sanitizer
 cleanup checks. macOS LeakSanitizer is unsupported and disabled; it is not a

@@ -40,9 +40,9 @@ template <class T>
 struct concrete_adapter;
 template <class T>
 concept nominal_record_adapter = requires(const T& input, const value& encoded) {
-    { record_adapter<T>::type() } -> std::same_as<value_type>;
-    { record_adapter<T>::to_value(input) } -> std::same_as<value>;
-    { record_adapter<T>::from_value(encoded) } -> std::same_as<T>;
+    {record_adapter<T>::type()}->std::same_as<value_type>;
+    {record_adapter<T>::to_value(input)}->std::same_as<value>;
+    {record_adapter<T>::from_value(encoded)}->std::same_as<T>;
 };
 template <class T>
 struct boundary_adapter;
@@ -573,7 +573,8 @@ struct boundary_adapter {
             const auto& expected = adapter_record_type<T>();
             auto encoded = record_adapter<T>::to_value(source);
             if (!encoded.type().compatible_with(expected))
-                throw std::invalid_argument("record adapter returned the wrong nominal record type");
+                throw std::invalid_argument(
+                    "record adapter returned the wrong nominal record type");
             return encoded;
         } else {
             return concrete_adapter<T>::from(source);
