@@ -58,19 +58,21 @@ struct record_adapter<nominal_bounds> {
     /// Returns this adapter's complete nested nominal descriptor.
     static value_type type() {
         static const auto descriptor = value_type::record(
-            "tests.nominal_bounds",
-            std::array{record_field{"width", value_type::leaf<double>()},
-                       record_field{"height", value_type::leaf<double>()}});
+            "tests.nominal_bounds", std::array{record_field{"width", value_type::leaf<double>()},
+                                               record_field{"height", value_type::leaf<double>()}});
         return descriptor;
     }
     /// Encodes one nested nominal value with source-order field ownership.
     static value to_value(const nominal_bounds& source) {
-        return value::record(type(), std::array{value::from(source.width), value::from(source.height)});
+        return value::record(type(),
+                             std::array{value::from(source.width), value::from(source.height)});
     }
     /// Decodes one nested nominal value after complete descriptor validation.
     static nominal_bounds from_value(const value& source) {
-        if (!source.type().same_shape(type())) throw std::invalid_argument("wrong nominal bounds type");
-        return {.width = source.field("width").as<double>(), .height = source.field("height").as<double>()};
+        if (!source.type().same_shape(type()))
+            throw std::invalid_argument("wrong nominal bounds type");
+        return {.width = source.field("width").as<double>(),
+                .height = source.field("height").as<double>()};
     }
 };
 
@@ -91,7 +93,8 @@ struct record_adapter<nominal_widget> {
     }
     /// Decodes one nominal value after complete descriptor validation.
     static nominal_widget from_value(const value& source) {
-        if (!source.type().same_shape(type())) throw std::invalid_argument("wrong nominal widget type");
+        if (!source.type().same_shape(type()))
+            throw std::invalid_argument("wrong nominal widget type");
         return {.enabled = source.field("enabled").as<bool>(),
                 .bounds = source.field("bounds").as<nominal_bounds>()};
     }
@@ -408,9 +411,10 @@ TEST_CASE("nominal record adapter round-trips values and enforces complete schem
     CHECK(decoded.bounds.width == doctest::Approx(2.5));
     CHECK(decoded.bounds.height == doctest::Approx(4.0));
     const auto wrong = cel::value::record(
-        cel::value_type::record("tests.other_widget",
-                                std::array{cel::record_field{"enabled", cel::value_type::leaf<bool>()},
-                                           cel::record_field{"bounds", cel::record_adapter<nominal_bounds>::type()}}),
+        cel::value_type::record(
+            "tests.other_widget",
+            std::array{cel::record_field{"enabled", cel::value_type::leaf<bool>()},
+                       cel::record_field{"bounds", cel::record_adapter<nominal_bounds>::type()}}),
         std::array{cel::value::from(true),
                    cel::value::from(nominal_bounds{.width = 1.0, .height = 1.0})});
     CHECK_THROWS_AS(cel::record_adapter<nominal_widget>::from_value(wrong), std::invalid_argument);
