@@ -1,47 +1,9 @@
 // SPDX-License-Identifier: BSL-1.0
-#include "type_ops.hpp"
-#include "value_ops.hpp"
-#include <cel/runtime/dyn_segment.hpp>
-#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <array>
-#include <doctest/doctest.h>
+#include <cel/runtime/dyn_segment.hpp>
 #include <limits>
-
-/// Tracks opaque result owners to detect sibling cleanup and accidental projection cloning.
-int opaque_owners = 0;
-/// Counts canonical opaque clones, independently of outer-storage allocation.
-int opaque_clones = 0;
-/// Identifies one live opaque owner in canonical bytes.
-struct opaque_carrier {
-    int* owner; ///< Owns one test resource.
-};
-/// Clones a test resource into an independent canonical carrier.
-void clone_opaque(const std::byte* source, std::byte* destination) {
-    opaque_carrier input{};
-    std::memcpy(&input, source, sizeof(input));
-    auto owner = std::make_unique<int>(*input.owner);
-    const opaque_carrier output{owner.release()};
-    std::memcpy(destination, &output, sizeof(output));
-    ++opaque_owners;
-    ++opaque_clones;
-}
-/// Destroys one live canonical resource.
-void destroy_opaque(std::byte* source) noexcept {
-    opaque_carrier input{};
-    std::memcpy(&input, source, sizeof(input));
-    delete input.owner;
-    --opaque_owners;
-}
-/// Builds a trusted opaque owner with the specified installed complete witness.
-cel::value make_opaque(const cel::value_type& type) {
-    auto owner = std::make_unique<int>(4);
-    const opaque_carrier input{owner.get()};
-    auto result = cel::detail::value_access::take(type, reinterpret_cast<const std::byte*>(&input));
-    [[maybe_unused]] auto* retired_source = owner.release();
-    ++opaque_owners;
-    return result;
-}
-
+#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include <doctest/doctest.h>
 TEST_CASE("nested packing consumes source order and preserves exact owners") {
     cel::dyn_segment b;
     b.just(cel::value::from(std::vector{2.0, 3.0}));
@@ -312,31 +274,4 @@ TEST_CASE("nested record array packing and projection preserve caller prefix") {
         CHECK(stack.depth() == 1);
     }
     CHECK(stack.pop<std::vector<double>>() == std::vector{9.0});
-}
-TEST_CASE("consuming projection transfers selected owners and retires siblings without cloning") {
-    const auto signature = cel::detail::type_access::install_callable_ownership(
-        cel::value_type::callable({}, cel::value_type::leaf<bool>()),
-        {clone_opaque, destroy_opaque});
-    {
-        cel::dyn_segment b;
-        b.just(make_opaque(signature));
-        b.just(make_opaque(signature));
-        b.make_array(2, signature, {});
-        b.make_tuple(1, {});
-        b.project_tuple(0);
-        b.just(cel::value::from(1.0));
-        b.index_array();
-        auto program = std::move(b).finish();
-        cel::raw_stack stack;
-        const auto clones = opaque_clones;
-        {
-            auto result = program.execute(stack, {});
-            CHECK(result.type().same_shape(signature));
-            CHECK(opaque_clones - clones == 2);
-            CHECK(opaque_owners == 3);
-        }
-        CHECK(opaque_owners == 2);
-        CHECK(stack.depth() == 0);
-    }
-    CHECK(opaque_owners == 0);
 }
