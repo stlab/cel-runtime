@@ -155,6 +155,7 @@ callable callable::from_value(const value& source) {
 #include <array>
 #include <cel/runtime.hpp>
 #include <doctest/doctest.h>
+#include <ostream>
 
 namespace {
 /// Supplies a hidden over-aligned intermediate whose final callable result is scalar.
