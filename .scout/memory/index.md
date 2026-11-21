@@ -3,6 +3,7 @@
 ## Knowledge
 
 - [[knowledge/detect-metadata-last-ownership-atomically-and-detach-every-child-before-deletion.md|Detect metadata last ownership atomically and detach every child before deletion]] (decision, 1.00) `ownership` `retirement` `concurrency` `metadata`
+- [[knowledge/inline-doctest-diagnostics-need-direct-ostream-includes-on-msvc.md|Inline doctest diagnostics need direct ostream includes on MSVC]] (discovery, 0.99) `testing` `doctest` `msvc` `headers` `inline-tests`
 - [[knowledge/keep-scout-knowledge-filenames-discoverable.md|Keep Scout knowledge filenames discoverable]] (discovery, 0.80) `scout` `memory` `search` `file-classification` `filenames`
 - [[knowledge/let-cpp-library-own-documentation-generation.md|Let cpp-library own documentation generation]] (observation, 0.80) `cmake` `cpp-library` `cpp-library-setup` `documentation` `docs-target` `post-build`
 - [[knowledge/portable-private-cpp-thread-linkage.md|Use cpp-library default portable thread linkage]] (observation, 0.80) `cmake` `resource-test` `threads` `threads-threads` `std-jthread` `std-latch` `pthread`
