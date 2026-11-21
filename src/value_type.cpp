@@ -80,6 +80,7 @@ void type_access::retire(value_type& type, retirement_queue& queue) noexcept {
     type._plan.retire(queue);
 }
 
+namespace {
 /// Compiles reusable carrier ranges from complete canonical fields.
 ///
 /// \pre plan is unpublished and its fields and offsets agree.
@@ -108,6 +109,7 @@ void compile_ownership(type_plan& plan) {
     if (!plan.ownership.empty()) std::swap(plan.ownership[largest], plan.ownership.back());
 }
 
+} // namespace
 std::size_t plan_pair_hash::operator()(
     const std::pair<const type_plan*, const type_plan*>& pair) const noexcept {
     const auto a = std::hash<const type_plan*>{}(pair.first);
@@ -313,6 +315,7 @@ std::size_t compatibility_context::require(const value_type& expected, const val
     return _compared - before;
 }
 
+namespace {
 /// Extends a plan's canonical layout and complete aggregate capabilities with source-order fields.
 ///
 /// \pre plan has a valid canonical prefix.
@@ -343,6 +346,7 @@ void canonical_layout(type_plan& plan, std::span<const value_type> fields) {
 /// Returns whether the type satisfies built-in/composite callable parameter admission.
 bool parameter_allowed(const value_type& type) { return type_access::parameter_allowed(type); }
 
+} // namespace
 } // namespace cel::detail
 
 namespace cel {
@@ -500,3 +504,232 @@ const value_type& value_type::result() const {
 }
 
 } // namespace cel
+
+#include <cpp-library/testing.hpp>
+#if CPP_LIBRARY_TESTING()
+#include "value_ops.hpp"
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cel/runtime/value.hpp>
+#include <doctest/doctest.h>
+#include <latch>
+#include <limits>
+#include <memory>
+#include <stdexcept>
+#include <thread>
+#include <vector>
+
+namespace {
+/// Runs two nonthrowing callbacks on separate threads behind one start gate and joins them.
+///
+/// Thread-start failures propagate after releasing any already started worker.
+/// Complexity: callback work plus thread startup and joining; O(1) auxiliary space.
+template <class First, class Second>
+void run_concurrently(First first, Second second) {
+    std::latch start{1};
+    std::array<std::jthread, 2> threads;
+    const auto release = [](std::latch* gate) noexcept { gate->count_down(); };
+    const std::unique_ptr<std::latch, decltype(release)> release_on_exit(&start, release);
+    threads[0] = std::jthread([&] {
+        start.wait();
+        first();
+    });
+    threads[1] = std::jthread([&] {
+        start.wait();
+        second();
+    });
+}
+
+/// Records actual node disposal and reentrant callbacks across independent retirement queues.
+struct retirement_counts {
+    std::atomic<std::size_t> disposed{0}; ///< Counts destroyed nodes.
+    std::atomic<bool> nested{false};      ///< Records nesting within one thread.
+};
+
+/// An owned chain node for checking the retirement primitive used by type metadata.
+struct retirement_probe : cel::detail::retirement_node {
+    retirement_counts& counts; ///< Borrows counters until every worker has joined.
+    cel::detail::retirement_ptr<retirement_probe> child; ///< Retains the next chain node.
+    static inline thread_local std::size_t depth = 0; ///< Counts active callbacks on this thread.
+
+    /// Adopts one child edge and retains the disposal counters.
+    retirement_probe(retirement_counts& state, cel::detail::retirement_ptr<retirement_probe> next) :
+        retirement_node(dispose_node), counts(state), child(std::move(next)) {}
+
+    /// Records disposal, detaches the child into queue, and deletes this node.
+    ///
+    /// \pre base is an exclusively retiring retirement_probe.
+    static void dispose_node(cel::detail::retirement_node& base,
+                             cel::detail::retirement_queue& queue) noexcept {
+        auto& node = static_cast<retirement_probe&>(base);
+        ++depth;
+        if (depth != 1) node.counts.nested.store(true, std::memory_order_relaxed);
+        node.child.retire(queue);
+        node.counts.disposed.fetch_add(1, std::memory_order_relaxed);
+        delete &node;
+        --depth;
+    }
+};
+
+/// Catches premature disposal or wrong last-owner selection during concurrent edge releases.
+TEST_CASE("concurrent last owners retire each node once without nested callbacks") {
+    constexpr std::size_t count = 12000;
+    retirement_counts counts;
+    cel::detail::retirement_ptr<retirement_probe> root;
+    CHECK(root.get() == nullptr);
+    std::vector<cel::detail::retirement_ptr<retirement_probe>> aliases;
+    // Retain interior aliases so independent queues also compete below the root.
+    for (std::size_t i = 0; i != count; ++i) {
+        auto next = std::make_unique<retirement_probe>(counts, std::move(root));
+        root = cel::detail::retirement_ptr<retirement_probe>(next.release());
+        if (i % 2 == 0) aliases.push_back(root);
+    }
+    {
+        auto copy = root;
+        CHECK(copy == root);
+        CHECK(copy.get() == root.get());
+        auto moved = std::move(copy);
+        // NOLINTNEXTLINE(bugprone-use-after-move): moves promise an empty source handle.
+        CHECK_FALSE(copy);
+        CHECK(moved == root);
+    }
+    CHECK(counts.disposed.load() == 0);
+    run_concurrently([owner = std::move(root)]() mutable { owner = {}; },
+                     [owners = std::move(aliases)]() mutable {
+                         while (!owners.empty())
+                             owners.pop_back();
+                     });
+    CHECK(counts.disposed.load() == count);
+    CHECK_FALSE(counts.nested.load());
+}
+
+/// Catches disposing metadata before its last-owner queue drains.
+TEST_CASE("queued metadata retains borrowed views until disposal") {
+    const auto boolean = cel::value_type::leaf<bool>();
+    auto type = cel::value_type::record(
+        "queued", std::array{cel::record_field{"items", cel::value_type::array(boolean)},
+                             cel::record_field{"code", cel::value_type::callable(
+                                                           std::array{boolean},
+                                                           cel::value_type::leaf<double>())}});
+    const auto fields = type.fields();
+    const auto names = type.field_names();
+    const auto identity = type.record_identity();
+    const auto& element = fields[0].element();
+    const auto parameters = fields[1].parameters();
+    const auto& result = fields[1].result();
+    cel::detail::retirement_queue queue;
+    cel::detail::type_access::retire(type, queue);
+    CHECK(identity == "queued");
+    CHECK(names[0] == "items");
+    CHECK(names[1] == "code");
+    CHECK(element.same_shape(boolean));
+    CHECK(parameters[0].same_shape(boolean));
+    CHECK(result.same_shape(cel::value_type::leaf<double>()));
+}
+/// Checks every carrier offset and a linear bound on constant-time traversal steps.
+/// Complexity: O(count log count) time and O(count) temporary space.
+void check_ownership_traversal(const cel::value_type& type, std::size_t count) {
+    cel::detail::ownership_cursor cursor(type);
+    std::vector<std::size_t> offsets;
+    std::size_t steps = 0;
+    while (!cursor.empty()) {
+        if (const auto slot = cursor.next()) {
+            CHECK((slot->type->kind() == cel::type_kind::array));
+            offsets.push_back(slot->offset);
+        }
+        ++steps;
+    }
+    REQUIRE((offsets.size() == count));
+    CHECK((steps <= 3 * count));
+    std::sort(offsets.begin(), offsets.end());
+    for (std::size_t i = 0; i != count; ++i)
+        CHECK((offsets[i] == i * sizeof(void*)));
+}
+
+/// Catches repeated root searches and expanded metadata at every skewed descriptor.
+TEST_CASE("ownership ranges traverse wide and skewed aggregates in linear work") {
+    constexpr std::size_t count = 2048;
+    const auto element = cel::value::from(std::vector<double>{3.0});
+    const cel::value_type unit;
+    const std::vector<cel::value> fields(count, element);
+    const auto flat = cel::value::tuple(fields);
+    check_ownership_traversal(flat.type(), count);
+
+    for (const bool heavy_first : {false, true}) {
+        auto type = element.type();
+        std::size_t ranges = 0;
+        std::size_t range_bytes = 0;
+        for (std::size_t i = 1; i != count; ++i) {
+            const auto children =
+                heavy_first ? std::array{type, element.type()} : std::array{element.type(), type};
+            type = cel::value_type::tuple(children);
+            const auto compiled = cel::detail::type_access::ownership_ranges(type);
+            ranges += compiled.size();
+            range_bytes += compiled.size_bytes();
+        }
+        CHECK(ranges <= 2 * count);
+        CHECK(range_bytes <= 2 * count * sizeof(cel::detail::ownership_slot));
+        check_ownership_traversal(type, count);
+        auto original =
+            cel::detail::value_access::copy(type, cel::detail::value_access::data(flat));
+        auto copy = original;
+        original = cel::value{};
+        auto restored =
+            cel::detail::value_access::copy(flat.type(), cel::detail::value_access::data(copy));
+        CHECK(restored.at(0).at(0).as<double>() == 3.0);
+        CHECK(restored.at(count - 1).at(0).as<double>() == 3.0);
+        copy = cel::value{};
+        restored = cel::value{};
+        type = unit;
+    }
+}
+/// Catches expansion of shared ranges and traversal proportional to unary nesting.
+TEST_CASE("ownership ranges reuse shared descendants and collapse unary paths") {
+    auto type = cel::value_type::array(cel::value_type::leaf<double>());
+    std::size_t ranges = 0;
+    for (std::size_t i = 0; i != 12; ++i) {
+        type = cel::value_type::tuple(std::array{type, type});
+        ranges += cel::detail::type_access::ownership_ranges(type).size();
+    }
+    CHECK(ranges <= 24);
+    check_ownership_traversal(type, 4096);
+    for (std::size_t i = 0; i != 50000; ++i)
+        type = cel::value_type::tuple(std::array{type});
+    check_ownership_traversal(type, 4096);
+}
+/// Catches recursive cloning and destruction of owned array trees.
+TEST_CASE("deep owned array trees clone release and unwind without recursive cleanup") {
+    auto source = cel::value::from(true);
+    for (std::size_t i = 0; i != 50000; ++i)
+        source = cel::detail::value_access::take_array(source.type(), std::span(&source, 1));
+    auto copy = source;
+    CHECK(copy.type().same_shape(source.type()));
+    CHECK(copy.size() == 1);
+    copy = cel::value{};
+    source = cel::value{};
+    CHECK_THROWS_AS(
+        [] {
+            auto tree = cel::value::from(false);
+            for (std::size_t i = 0; i != 50000; ++i)
+                tree = cel::detail::value_access::take_array(tree.type(), std::span(&tree, 1));
+            throw std::runtime_error("unwind packed ownership");
+        }(),
+        std::runtime_error);
+}
+
+/// Catches recursion through deeply nested inline fields even when only one carrier exists.
+TEST_CASE("deep inline aggregate ownership paths are stack independent") {
+    const auto leaf_array = cel::value::from(std::vector<double>{2.0, 3.0});
+    auto type = leaf_array.type();
+    for (std::size_t i = 0; i != 50000; ++i)
+        type = cel::value_type::tuple(std::array{type});
+    auto owner = cel::detail::value_access::copy(type, cel::detail::value_access::data(leaf_array));
+    auto copy = owner;
+    CHECK(copy.type().same_shape(type));
+    owner = cel::value{};
+    copy = cel::value{};
+}
+} // namespace
+
+#endif

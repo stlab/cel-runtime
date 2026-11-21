@@ -75,10 +75,17 @@ Independent final port review and remote/platform validation remain pending.
 
 ## Reproduce local validation
 
-The pinned cpp-library release is `v6.1.0` at revision
-`13ff79ac9fbbf575bbab0ab3dee0c752b4501fcc`. Its presets, doctest/CTest,
-compile-fail gates, Doxygen, exports, installation, and generated CI remain in
-use.
+The pinned cpp-library release is `v6.2.0` at revision
+`4f60491f7550cb058af855346decc71ce0d5365e`. Its presets, doctest/CTest,
+compile-fail gates, Doxygen, and generated source-build CI remain in use.
+Thread support comes from cpp-library's default library linkage.
+
+Private tests live beside their implementations in `src/*.cpp`, guarded by
+`#if CPP_LIBRARY_TESTING()` after including `<cpp-library/testing.hpp>`.
+CTest runs them through the generated `runtime_in_source_tests` executable.
+Standalone `tests/*_test.cpp` files retain public API coverage without the
+private source include directory. Production builds disable the guarded tests
+and do not require doctest.
 
 Run Debug and lint checks from the checkout:
 
@@ -127,10 +134,10 @@ regressions and rejects higher-order foreign result ownership before effects
 or raw preparation. Runtime-managed literals, array/tuple children, and lazy
 bodies retire through one nonallocating last-owner worklist; shared code and
 invocation guards retain their original semantics.
-The shipped `tests/executable_retirement_test.cpp` and `tests/callable_test.cpp`
-retain the corresponding regressions. Use the Debug, Release, and sanitizer
-commands on this page to reproduce them against this checkout, then install
-normal and instrumented packages separately for parser validation.
+The shipped `tests/executable_retirement_test.cpp`, `tests/callable_test.cpp`,
+and guarded cases in `src/raw_segment.cpp` and `src/callable.cpp` retain the
+corresponding regressions. Use the Debug, Release, and sanitizer commands on
+this page to reproduce them against this checkout.
 
 The API correction adds `native_contract_test`, bringing the suite to 17 CTests.
 It covers `native_type<T>()`, cached `origin_below(count)` boundaries, and

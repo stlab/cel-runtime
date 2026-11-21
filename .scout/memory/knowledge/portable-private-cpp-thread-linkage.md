@@ -1,5 +1,5 @@
 ---
-title: "Keep resource_test thread linkage portable and private"
+title: "Use cpp-library default portable thread linkage"
 entity_type: observation
 confidence: 0.80
 created: 2026-11-19T22:24:03Z
@@ -7,8 +7,9 @@ last_accessed: 2026-11-19T22:24:03Z
 last_reinforced: 2026-11-19T22:24:03Z
 access_count: 1
 sources:
-  - "CMakeLists.txt:31-38"
-  - "tests/resource_test.cpp:23-36"
+  - "CMakeLists.txt:6-7"
+  - "CMakeLists.txt:18-29"
+  - "docs/runtime-milestone.md:78-88"
 tags: ["cmake", "resource-test", "threads", "threads-threads", "std-jthread", "std-latch", "pthread"]
 tier: knowledge
 source: inferred
@@ -17,8 +18,20 @@ relationships:
     target: "Keep Scout knowledge filenames discoverable"
 ---
 
-# Keep resource_test thread linkage portable and private
+# Use cpp-library default portable thread linkage
 
-Within PROJECT_IS_TOP_LEVEL AND BUILD_TESTING, CMakeLists.txt:31-38 finds Threads and links resource_test PRIVATE to Threads::Threads. The run_concurrently helper in tests/resource_test.cpp:23-36 creates two std::jthread workers behind a std::latch start gate.
+The cpp-library 6.2.0 setup enables portable thread support by default.
+`CMakeLists.txt` pins that release and calls `cpp_library_setup()` without
+opting out. Its setup finds Threads and links the compiled runtime publicly
+to `Threads::Threads`; generated test implementations and runners inherit
+the requirement. Do not restore the former resource_test-only manual link.
 
-Preserve portable, target-scoped thread linkage while this test uses these facilities. Standard C++ thread APIs do not remove platform compiler/linker requirements such as -pthread; CMake's FindThreads imported target encapsulates those requirements, even when it expands to no additional flags on macOS or another platform. A successful build on such a platform is not evidence that the dependency is redundant. Keep this a private test requirement, not a public dependency for every consumer. Future cpp-library centralization is compatible with this lesson if it supplies the same portable target-scoped requirement.
+The metadata and retirement concurrency tests use two `std::jthread` workers
+behind a `std::latch` start gate. Public metadata coverage remains in
+`tests/resource_test.cpp`; private retirement coverage lives in guarded
+in-source tests in `src/value_type.cpp`.
+
+Standard C++ thread APIs do not remove platform compiler/linker requirements
+such as `-pthread`. CMake's imported target encapsulates those requirements,
+even when it adds no flags on macOS. A passing build on such a platform does
+not establish that the dependency is redundant.

@@ -1,32 +1,9 @@
 // SPDX-License-Identifier: BSL-1.0
 #ifndef CEL_RUNTIME_FRAME_HPP
 #define CEL_RUNTIME_FRAME_HPP
-#include "storage.hpp"
 #include <cel/runtime/detail/frame.hpp>
-#include <vector>
 
 namespace cel::detail {
-/// A live canonical operand with retained destruction metadata.
-struct stack_slot {
-    value_type type;      ///< Retains the complete descriptor until payload retirement.
-    std::size_t previous; ///< Restores the cursor, including preceding padding.
-    std::size_t offset;   ///< Locates canonical bytes in reusable storage.
-};
-/// The exclusive state of a reusable operand stack and its evaluation scopes.
-///
-/// Zero-byte operands remain distinct live slots. Only the innermost frame mutates the
-/// stack, and canonical phases exclude reentrant mutation, extraction, and frame entry.
-struct stack_state {
-    // [knowledge] slots describes exactly the initialized live owners. cursor excludes
-    // spare initialized bytes; each slot.previous restores the prior byte cursor,
-    // including padding. active borrows the innermost frame, and phase_active belongs
-    // to the one current canonical ownership operation.
-    storage bytes;                 ///< Owns bytewise-transferable canonical storage.
-    std::vector<stack_slot> slots; ///< Owns exactly the initialized operand slots.
-    std::size_t cursor = 0;        ///< Marks active bytes, not spare initialized storage.
-    frame* active = nullptr;       ///< Borrows the innermost live frame.
-    bool phase_active = false;     ///< Excludes reentry while canonical bytes/slots are unstable.
-};
 /// Trusted canonical access for signature-checked instructions.
 ///
 /// Operand views acquire no ownership and expire on stack mutation or destruction.
@@ -50,20 +27,7 @@ struct frame_access {
     ///
     /// Complexity: growth costs, including newly initialized spare bytes; no main-stack
     /// allocation when byte, alignment, and slot reservations suffice.
-    static void reserve_result(frame& scope, const value_type& result, std::size_t consumed) {
-        scope.require_active();
-        auto& data = scope._stack->state();
-        if (consumed > data.slots.size() - scope._checkpoint)
-            throw std::out_of_range("transfer operand underflow");
-        raw_stack::phase_guard phase(*scope._stack);
-        const auto remaining = data.slots.size() - consumed;
-        const auto cursor = consumed == 0 ? data.cursor : data.slots[remaining].previous;
-        const auto bytes = result.byte_layout();
-        const auto extent = checked_add(align_offset(cursor, bytes.alignment), bytes.size);
-        data.slots.reserve(checked_add(remaining, 1));
-        data.bytes.reserve(extent, bytes.alignment);
-        if (extent > data.bytes.size()) data.bytes.resize(extent);
-    }
+    static void reserve_result(frame& scope, const value_type& result, std::size_t consumed);
     /// An operand view borrowed for one canonical acquisition.
     ///
     /// The enclosing acquire call bounds every use; copies do not extend that lifetime.

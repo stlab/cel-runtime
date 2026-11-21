@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.24)
 include(cmake/CPM.cmake)
 
 # Fetch cpp-library before project()
-CPMAddPackage("gh:stlab/cpp-library@6.1.0")
+CPMAddPackage("gh:stlab/cpp-library@6.2.0")
 include(${cpp-library_SOURCE_DIR}/cpp-library.cmake)
 
 # Enable dependency tracking before project()
@@ -28,12 +28,10 @@ cpp_library_setup(
     DOCS_OPTIONS "USE_MDFILE_AS_MAINPAGE = ${CMAKE_CURRENT_SOURCE_DIR}/README.md"
 )
 
-if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING)
-    foreach(test storage_test raw_execution_test value_test resource_test segment_test
-        callable_test executable_retirement_test composite_execution_test)
-        target_include_directories(${test} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-    endforeach()
-
-    find_package(Threads REQUIRED)
-    target_link_libraries(resource_test PRIVATE Threads::Threads)
-endif()
+# Same-directory includes suffice; do not propagate private headers to standalone tests.
+get_property(runtime_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(runtime_target IN LISTS runtime_targets)
+    get_property(runtime_includes TARGET "${runtime_target}" PROPERTY INCLUDE_DIRECTORIES)
+    list(REMOVE_ITEM runtime_includes "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    set_property(TARGET "${runtime_target}" PROPERTY INCLUDE_DIRECTORIES "${runtime_includes}")
+endforeach()

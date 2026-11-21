@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: BSL-1.0
-#include "instruction.hpp"
-#include "type_ops.hpp"
-#include "value_ops.hpp"
+#include <array>
 #include <cel/runtime.hpp>
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
-#include <array>
 #include <doctest/doctest.h>
-
 /// Supplies a valid client-defined closure result, not a parameter.
 struct client_result {
     int number; ///< Retains client data.
@@ -15,35 +11,6 @@ struct client_result {
 struct alignas(256) wide_result {
     bool flag; ///< Retains the intermediate result.
 };
-/// Counts foreign ownership operations to detect access before ABI rejection.
-int foreign_clones = 0;
-/// Counts foreign canonical retirement.
-int foreign_destroys = 0;
-/// Copies a foreign opaque carrier without treating its bytes as installed callable code.
-void clone_foreign(const std::byte* source, std::byte* destination) {
-    std::memcpy(destination, source, sizeof(void*));
-    ++foreign_clones;
-}
-/// Retires the resource-free foreign representation without dereferencing it.
-void destroy_foreign(std::byte*) noexcept { ++foreign_destroys; }
-TEST_CASE("runtime ownership binding preserves deferred signatures and canonical witnesses") {
-    const auto number = cel::value_type::leaf<double>();
-    const auto declared = cel::value_type::callable(std::array{number}, number);
-    const auto bound = cel::bind_runtime_ownership(declared);
-    cel::dyn_segment body;
-    body.push_argument(0, number);
-    cel::callable actual(std::move(body).finish(), std::array{number});
-    CHECK_FALSE(declared.owns_values());
-    CHECK(bound.owns_values());
-    CHECK(bound.same_shape(declared));
-    CHECK(bound.compatible_with(actual.type()));
-    CHECK_FALSE(declared.compatible_with(actual.type()));
-    CHECK(cel::bind_runtime_ownership(bound).compatible_with(bound));
-    CHECK(cel::detail::type_access::same_plan(cel::bind_runtime_ownership(bound), bound));
-    CHECK(cel::detail::type_access::same_plan(cel::bind_runtime_ownership(actual.type()),
-                                              actual.type()));
-    CHECK_THROWS_AS(cel::value_type::callable(std::array{bound}, number), std::invalid_argument);
-}
 TEST_CASE("bound empty callable arrays retain ownership beyond compiler metadata lifetimes") {
     const auto declared = cel::value_type::callable({}, cel::value_type::leaf<double>());
     cel::dyn_segment rejected;
@@ -68,34 +35,6 @@ TEST_CASE("bound empty callable arrays retain ownership beyond compiler metadata
     closure_body.just(result);
     cel::callable factory(std::move(closure_body).finish(), {});
     CHECK(factory.call(stack, {}).size() == 0);
-}
-TEST_CASE("binding preserves nested nominal layout client identities and range forms") {
-    const auto declared = cel::value_type::callable({}, cel::value_type::leaf<double>());
-    const auto client = cel::value_type::leaf<wide_result>();
-    const auto range =
-        cel::value_type::range(cel::range_kind::range_inclusive, cel::value_type::leaf<double>());
-    const auto tuple = cel::value_type::tuple(std::array{client, declared, range});
-    const auto record = cel::value_type::record(
-        "named", std::array{cel::record_field{"nested", cel::value_type::array(tuple)},
-                            cel::record_field{"wide", client}});
-    const auto bound = cel::bind_runtime_ownership(record);
-    CHECK_FALSE(record.owns_values());
-    CHECK(bound.owns_values());
-    CHECK(bound.same_shape(record));
-    CHECK(bound.record_identity() == "named");
-    CHECK(bound.field_names()[0] == "nested");
-    CHECK(bound.field_names()[1] == "wide");
-    CHECK(bound.offsets()[0] == record.offsets()[0]);
-    CHECK(bound.offsets()[1] == record.offsets()[1]);
-    CHECK(bound.byte_layout().alignment == 256);
-    CHECK(bound.fields()[1].leaf_identity() == typeid(wide_result));
-    CHECK(cel::detail::type_access::same_plan(bound.fields()[1], client));
-    CHECK(bound.fields()[0].element().fields()[2].form() == cel::range_kind::range_inclusive);
-    CHECK_THROWS_AS(cel::value_type::callable(std::array{bound}, client), std::invalid_argument);
-    cel::dyn_segment builder;
-    builder.make_array(0, bound, {});
-    cel::raw_stack stack;
-    CHECK(std::move(builder).finish().execute(stack, {}).size() == 0);
 }
 TEST_CASE("binding covers higher order result witnesses and populated callable arrays") {
     const auto number = cel::value_type::leaf<double>();
@@ -129,56 +68,6 @@ TEST_CASE("binding covers higher order result witnesses and populated callable a
     cel::dyn_segment empty;
     empty.make_array(0, bound, {});
     CHECK(std::move(empty).finish().execute(stack, {}).size() == 0);
-}
-TEST_CASE("binding rejects foreign operations throughout metadata without invoking owners") {
-    const auto declared = cel::value_type::callable({}, cel::value_type::leaf<double>());
-    const auto foreign = cel::detail::type_access::install_callable_ownership(
-        declared, {clone_foreign, destroy_foreign});
-    cel::dyn_segment body;
-    body.just(cel::value::from(7.0));
-    cel::callable actual(std::move(body).finish(), {});
-    const auto aggregate = cel::value_type::tuple(std::array{cel::value_type::array(foreign)});
-    const auto nested = cel::value_type::callable({}, aggregate);
-    const auto installed_nested = cel::detail::type_access::install_callable_ownership(
-        nested, cel::detail::type_access::operations(actual.type()));
-    const auto mixed = cel::detail::type_access::install_callable_ownership(
-        declared, {cel::detail::type_access::operations(actual.type()).clone, destroy_foreign});
-    foreign_clones = 0;
-    foreign_destroys = 0;
-    for (const auto& input : std::array{foreign, aggregate, nested, installed_nested, mixed}) {
-        CHECK_THROWS_AS(cel::bind_runtime_ownership(input), std::invalid_argument);
-    }
-    CHECK(cel::detail::type_access::operations(foreign).clone == clone_foreign);
-    CHECK(cel::detail::type_access::operations(foreign).destroy == destroy_foreign);
-    CHECK(foreign_clones == 0);
-    CHECK(foreign_destroys == 0);
-}
-TEST_CASE("binding traverses deep metadata and preserves shared DAGs") {
-    auto deep = cel::value_type::callable({}, cel::value_type::leaf<double>());
-    for (int i = 0; i != 12000; ++i)
-        deep = cel::value_type::callable({}, cel::value_type::array(deep));
-    auto bound = cel::bind_runtime_ownership(deep);
-    CHECK(bound.same_shape(deep));
-    for (int i = 0; i != 12000; ++i) {
-        REQUIRE(bound.owns_values());
-        REQUIRE(bound.result().owns_values());
-        bound = bound.result().element();
-    }
-    CHECK(bound.owns_values());
-    auto shared = cel::value_type::callable({}, cel::value_type::leaf<double>());
-    constexpr int depth = 96;
-    for (int i = 0; i != depth; ++i) {
-        const auto edge = cel::value_type::array(shared);
-        shared = cel::value_type::tuple(std::array{edge, edge});
-    }
-    auto result = cel::bind_runtime_ownership(shared);
-    CHECK(result.same_shape(shared));
-    for (int i = 0; i != depth; ++i) {
-        REQUIRE(result.owns_values());
-        CHECK(cel::detail::type_access::same_plan(result.fields()[0], result.fields()[1]));
-        result = result.fields()[0].element();
-    }
-    CHECK(result.owns_values());
 }
 TEST_CASE("callable full declarations include unused composite parameters") {
     int effects = 0;
@@ -366,79 +255,6 @@ TEST_CASE("distinct callable carriers nest inside a guarded dynamic invocation")
     CHECK(inner_effects == 1);
     CHECK(outer_effects == 1);
     CHECK(stack.pop<std::vector<double>>() == std::vector{6.0});
-}
-TEST_CASE("conversion and dynamic invocation reject foreign same shape ownership before access") {
-    foreign_clones = 0;
-    foreign_destroys = 0;
-    int effects = 0;
-    cel::dyn_segment body;
-    body.just(cel::value::from(true));
-    cel::callable fn(std::move(body).finish(), {});
-    const auto foreign = cel::detail::type_access::install_callable_ownership(
-        fn.type(), {clone_foreign, destroy_foreign});
-    alignas(void*) const std::array<std::byte, sizeof(void*)> null_carrier{};
-    auto impostor = cel::detail::value_access::take(foreign, null_carrier.data());
-    CHECK(impostor.type().same_shape(fn.type()));
-    CHECK_THROWS_AS(cel::callable::from_value(impostor), std::invalid_argument);
-    CHECK(foreign_clones == 0);
-    CHECK(foreign_destroys == 0);
-    cel::dyn_segment b;
-    b.just(std::move(impostor));
-    b.op0<void>([&effects] { ++effects; });
-    const auto original = b.snapshot();
-    CHECK_THROWS_AS(b.invoke_closure(0), std::invalid_argument);
-    CHECK(b.snapshot() == original);
-    CHECK(effects == 0);
-    CHECK(foreign_clones == 0);
-    cel::raw_stack stack;
-    auto result = std::move(b).finish().execute(stack, {});
-    CHECK(result.type().same_shape(fn.type()));
-    CHECK(effects == 1);
-    CHECK(foreign_clones == 1);
-    CHECK_THROWS_AS(cel::callable::from_value(result), std::invalid_argument);
-}
-TEST_CASE("higher order results reject foreign ownership before checked execution and binding") {
-    for (bool nested : {false, true}) {
-        int effects = 0;
-        cel::dyn_segment inner_body;
-        inner_body.just(cel::value::from(7.0));
-        const auto canonical_inner = cel::callable(std::move(inner_body).finish(), {}).to_value();
-        const auto foreign_inner = cel::detail::type_access::install_callable_ownership(
-            canonical_inner.type(), {clone_foreign, destroy_foreign});
-        alignas(void*) const std::array<std::byte, sizeof(void*)> carrier{};
-        auto result = cel::detail::value_access::take(foreign_inner, carrier.data());
-        if (nested) {
-            std::array children{std::move(result)};
-            result = cel::value::tuple(children);
-        }
-        cel::dyn_segment foreign_body;
-        foreign_body.just(std::move(result));
-        const auto foreign_outer = cel::callable(std::move(foreign_body).finish(), {}).to_value();
-        const auto expected_result =
-            nested ? cel::value_type::tuple(std::array{canonical_inner.type()}) :
-                     canonical_inner.type();
-        const auto expected =
-            cel::bind_runtime_ownership(cel::value_type::callable({}, expected_result));
-        CHECK(foreign_outer.type().same_shape(expected));
-        CHECK_FALSE(foreign_outer.type().compatible_with(expected));
-        cel::dyn_segment reader;
-        reader.push_argument(0, expected);
-        reader.op0<void>([&effects] { ++effects; });
-        const auto program = std::move(reader).finish();
-        cel::raw_stack stack;
-        stack.push(true);
-        CHECK_THROWS_AS(program.execute(stack, std::array{foreign_outer}), std::invalid_argument);
-        CHECK(effects == 0);
-        CHECK(stack.depth() == 1);
-        CHECK(stack.pop<bool>());
-        CHECK_THROWS_AS(cel::detail::segment_access::prepare_raw(
-                            program, std::array{foreign_outer.type()}, expected),
-                        std::invalid_argument);
-        CHECK_THROWS_AS(cel::detail::segment_access::prepare_raw(program, std::array{expected},
-                                                                 foreign_outer.type()),
-                        std::invalid_argument);
-        CHECK(effects == 0);
-    }
 }
 TEST_CASE("closure construction validates reads parameters and independence") {
     cel::dyn_segment b;
