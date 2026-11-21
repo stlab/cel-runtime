@@ -516,6 +516,7 @@ const value_type& value_type::result() const {
 #include <latch>
 #include <limits>
 #include <memory>
+#include <ostream>
 #include <stdexcept>
 #include <thread>
 #include <vector>
