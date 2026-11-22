@@ -75,8 +75,8 @@ Independent final port review and remote/platform validation remain pending.
 
 ## Reproduce local validation
 
-The pinned cpp-library release is `v6.2.0` at revision
-`4f60491f7550cb058af855346decc71ce0d5365e`. Its presets, doctest/CTest,
+The pinned cpp-library release is `v7.0.0` at revision
+`7ba5a0471a780502395d113c44f26254dc58cd65`. Its presets, doctest/CTest,
 compile-fail gates, Doxygen, and generated source-build CI remain in use.
 Thread support comes from cpp-library's default library linkage.
 

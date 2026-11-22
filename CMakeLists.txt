@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.24)
 include(cmake/CPM.cmake)
 
 # Fetch cpp-library before project()
-CPMAddPackage("gh:stlab/cpp-library@6.2.0")
+CPMAddPackage("gh:stlab/cpp-library@7.0.0")
 include(${cpp-library_SOURCE_DIR}/cpp-library.cmake)
 
 # Enable dependency tracking before project()
@@ -27,11 +27,3 @@ cpp_library_setup(
     DOCS_EXCLUDE_SYMBOLS cel::detail cel::detail::*
     DOCS_OPTIONS "USE_MDFILE_AS_MAINPAGE = ${CMAKE_CURRENT_SOURCE_DIR}/README.md"
 )
-
-# Same-directory includes suffice; do not propagate private headers to standalone tests.
-get_property(runtime_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
-foreach(runtime_target IN LISTS runtime_targets)
-    get_property(runtime_includes TARGET "${runtime_target}" PROPERTY INCLUDE_DIRECTORIES)
-    list(REMOVE_ITEM runtime_includes "${CMAKE_CURRENT_SOURCE_DIR}/src")
-    set_property(TARGET "${runtime_target}" PROPERTY INCLUDE_DIRECTORIES "${runtime_includes}")
-endforeach()
