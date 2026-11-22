@@ -8,3 +8,4 @@
 - [[knowledge/let-cpp-library-own-documentation-generation.md|Let cpp-library own documentation generation]] (observation, 0.80) `cmake` `cpp-library` `cpp-library-setup` `documentation` `docs-target` `post-build`
 - [[knowledge/portable-private-cpp-thread-linkage.md|Use cpp-library default portable thread linkage]] (observation, 0.80) `cmake` `resource-test` `threads` `threads-threads` `std-jthread` `std-latch` `pthread`
 - [[knowledge/preflight-deferred-callable-ownership-before-copying-represented-bytes-while-preserving-empty-arrays.md|Preflight deferred callable ownership before copying represented bytes while preserving empty arrays]] (decision, 1.00) `cloning` `deferred-callables` `arrays` `exception-safety`
+- [[knowledge/preserve-cpp-library-public-and-private-compilation-boundaries.md|Preserve cpp-library public and private compilation boundaries]] (decision, 0.70) `cmake` `cpp-library` `compilation-boundary`
